@@ -1,6 +1,6 @@
 {
   "name": "linkedin-jobs-scraper-api",
-  "version": "2.0.0",
+  "version": "2.1.0",
   "description": "Production-ready LinkedIn Jobs Scraper API for RapidAPI",
   "main": "index.js",
   "scripts": {
