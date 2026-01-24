@@ -27,6 +27,9 @@ const config = {
   // Rate limiting
   RATE_LIMIT_WINDOW: 15 * 60 * 1000, // 15 minutes
   RATE_LIMIT_MAX: 100, // requests per window
+  
+  // Company enrichment (premium feature)
+  ENABLE_COMPANY_ENRICHMENT: true,
 };
 
 // ====================
@@ -91,9 +94,171 @@ const cache = new NodeCache({ stdTTL: config.CACHE_TTL });
 // ====================
 // Utility Functions
 // ====================
+class CompanyEnricher {
+  constructor() {
+    this.userAgents = [];
+    for (let i = 0; i < 10; i++) {
+      this.userAgents.push(new UserAgent({ deviceCategory: 'desktop' }).toString());
+    }
+  }
+
+  getRandomUserAgent() {
+    return this.userAgents[Math.floor(Math.random() * this.userAgents.length)];
+  }
+
+  getHeaders() {
+    return {
+      'User-Agent': this.getRandomUserAgent(),
+      'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
+      'Accept-Language': 'en-US,en;q=0.5',
+      'Accept-Encoding': 'gzip, deflate, br',
+      'Connection': 'keep-alive',
+      'Upgrade-Insecure-Requests': '1',
+      'Sec-Fetch-Dest': 'document',
+      'Sec-Fetch-Mode': 'navigate',
+      'Sec-Fetch-Site': 'none',
+      'Sec-Fetch-User': '?1',
+      'Cache-Control': 'max-age=0',
+    };
+  }
+
+  async fetchCompanyProfile(companyUrl) {
+    if (!companyUrl || !companyUrl.includes('/company/')) {
+      return null;
+    }
+
+    const cacheKey = `company:${companyUrl}`;
+    const cached = cache.get(cacheKey);
+    if (cached) {
+      return cached;
+    }
+
+    try {
+      // Ensure we have the full URL
+      let fullUrl = companyUrl;
+      if (!companyUrl.startsWith('http')) {
+        fullUrl = `${config.LINKEDIN_BASE_URL}${companyUrl}`;
+      }
+
+      const response = await axios.get(fullUrl, {
+        headers: this.getHeaders(),
+        timeout: config.REQUEST_TIMEOUT,
+      });
+
+      const $ = cheerio.load(response.data);
+      
+      // Extract company information
+      const companyInfo = {
+        about: this.extractCompanyAbout($),
+        employeeCount: this.extractEmployeeCount($),
+        headquarters: this.extractHeadquarters($),
+        website: this.extractWebsite($),
+        industry: this.extractIndustry($),
+        founded: this.extractFoundedYear($),
+        specialties: this.extractSpecialties($),
+      };
+
+      // Only cache if we got some data
+      if (companyInfo.about || companyInfo.employeeCount) {
+        cache.set(cacheKey, companyInfo);
+      }
+
+      return companyInfo;
+
+    } catch (error) {
+      console.error('Error fetching company profile:', error.message);
+      return null;
+    }
+  }
+
+  extractCompanyAbout($) {
+    const aboutSection = $('section[data-test-id="about-us"]');
+    if (aboutSection.length) {
+      const text = aboutSection.find('p, div.core-section-container__content').text().trim();
+      return text || null;
+    }
+    
+    // Alternative selectors
+    const selectors = [
+      '.about-us__description',
+      '.org-about-module__description',
+      '.company-about',
+      '[data-test-id="about-us"] p'
+    ];
+    
+    for (const selector of selectors) {
+      const element = $(selector);
+      if (element.length) {
+        const text = element.text().trim();
+        if (text) return text;
+      }
+    }
+    
+    return null;
+  }
+
+  extractEmployeeCount($) {
+    // Try multiple selectors for employee count
+    const selectors = [
+      'dt:contains("Company size") + dd',
+      'dt:contains("Employees") + dd',
+      '.org-page-details__employees',
+      '[data-test-id="about-us__size"]'
+    ];
+    
+    for (const selector of selectors) {
+      const element = $(selector);
+      if (element.length) {
+        const text = element.text().trim();
+        if (text) return this.cleanEmployeeCount(text);
+      }
+    }
+    
+    return null;
+  }
+
+  cleanEmployeeCount(text) {
+    // Extract numbers and format
+    const match = text.match(/(\d+(?:,\d+)*(?:\.\d+)?)/);
+    if (match) {
+      return match[0].replace(/,/g, '');
+    }
+    return text;
+  }
+
+  extractHeadquarters($) {
+    const locationElement = $('dt:contains("Headquarters") + dd');
+    return locationElement.length ? locationElement.text().trim() : null;
+  }
+
+  extractWebsite($) {
+    const websiteElement = $('dt:contains("Website") + dd a');
+    return websiteElement.length ? websiteElement.attr('href') : null;
+  }
+
+  extractIndustry($) {
+    const industryElement = $('dt:contains("Industry") + dd');
+    return industryElement.length ? industryElement.text().trim() : null;
+  }
+
+  extractFoundedYear($) {
+    const foundedElement = $('dt:contains("Founded") + dd');
+    return foundedElement.length ? foundedElement.text().trim() : null;
+  }
+
+  extractSpecialties($) {
+    const specialtiesElement = $('dt:contains("Specialties") + dd');
+    if (specialtiesElement.length) {
+      return specialtiesElement.text().trim().split(',').map(s => s.trim()).filter(Boolean);
+    }
+    return null;
+  }
+}
+
 class LinkedInScraper {
   constructor() {
     this.userAgents = [];
+    this.companyEnricher = new CompanyEnricher();
     for (let i = 0; i < 10; i++) {
       this.userAgents.push(new UserAgent({ deviceCategory: 'desktop' }).toString());
     }
@@ -134,25 +299,72 @@ class LinkedInScraper {
     }
   }
 
+  // Helper to clean text and handle null
+  cleanText(text) {
+    if (!text || typeof text !== 'string') return null;
+    const cleaned = text.trim().replace(/\s+/g, ' ');
+    return cleaned || null;
+  }
+
+  // Convert HTML to plain text
+  htmlToPlainText(html) {
+    if (!html) return null;
+    
+    try {
+      const $ = cheerio.load(html);
+      
+      // Remove script and style elements
+      $('script, style, noscript, iframe, embed, object').remove();
+      
+      // Get text and clean it
+      let text = $.text();
+      
+      // Clean up whitespace
+      text = text.replace(/\s+/g, ' ')
+                .replace(/\n+/g, '\n')
+                .replace(/\t+/g, ' ')
+                .trim();
+      
+      // Remove excessive line breaks
+      text = text.replace(/\n{3,}/g, '\n\n');
+      
+      return text || null;
+    } catch (error) {
+      console.error('Error converting HTML to text:', error);
+      return null;
+    }
+  }
+
   parseJobElement($, element) {
     const $element = $(element);
     
+    // Get raw values first
+    const rawTitle = $element.find('.base-search-card__title').text();
+    const rawCompany = $element.find('.base-search-card__subtitle').text();
+    const rawLocation = $element.find('.job-search-card__location').text();
+    const rawDate = $element.find('time').attr('datetime') || $element.find('time').text();
+    const rawLink = $element.find('.base-card__full-link').attr('href');
+    const rawCompanyLink = $element.find('.base-search-card__subtitle a').attr('href');
+    const rawCompanyLogo = $element.find('.artdeco-entity-image').attr('data-delayed-url') || 
+                          $element.find('.artdeco-entity-image').attr('src');
+    const hasEasyApply = $element.find('.simple-job-card__link').length > 0;
+    const rawInsights = $element.find('.job-search-card__insight').text();
+    
     return {
       id: $element.attr('data-id') || uuidv4(),
-      title: $element.find('.base-search-card__title').text().trim(),
-      company: $element.find('.base-search-card__subtitle').text().trim(),
-      location: $element.find('.job-search-card__location').text().trim(),
-      date: $element.find('time').attr('datetime') || $element.find('time').text().trim(),
-      link: $element.find('.base-card__full-link').attr('href') || '',
-      companyLink: $element.find('.base-search-card__subtitle a').attr('href') || '',
-      companyLogo: $element.find('.artdeco-entity-image').attr('data-delayed-url') || 
-                   $element.find('.artdeco-entity-image').attr('src') || '',
-      easyApply: $element.find('.simple-job-card__link').length > 0,
-      insights: $element.find('.job-search-card__insight').text().trim(),
+      title: this.cleanText(rawTitle),
+      company: this.cleanText(rawCompany),
+      location: this.cleanText(rawLocation),
+      date: this.cleanText(rawDate),
+      link: this.cleanText(rawLink),
+      companyLink: this.cleanText(rawCompanyLink),
+      companyLogo: this.cleanText(rawCompanyLogo),
+      easyApply: hasEasyApply || null,
+      insights: this.cleanText(rawInsights),
     };
   }
 
-  async searchJobs(keywords, location = '', page = 1, remote = false) {
+  async searchJobs(keywords, location = '', page = 1, remote = false, enrichCompanies = false) {
     const params = new URLSearchParams({
       keywords: keywords,
       location: location,
@@ -161,7 +373,7 @@ class LinkedInScraper {
     });
 
     const url = `${config.JOBS_SEARCH_URL}?${params.toString()}`;
-    const cacheKey = `jobs:${url}`;
+    const cacheKey = `jobs:${url}:${enrichCompanies}`;
 
     // Check cache
     const cached = cache.get(cacheKey);
@@ -175,7 +387,7 @@ class LinkedInScraper {
       const response = await this.fetchWithRetry(url);
       const $ = cheerio.load(response.data);
       
-      const jobs = [];
+      let jobs = [];
       const jobElements = $('.base-card');
       
       jobElements.each((i, element) => {
@@ -188,23 +400,42 @@ class LinkedInScraper {
       });
 
       // Extract pagination info
-      const totalResults = parseInt($('.results-context-header__job-count').text().replace(/\D/g, '')) || 0;
-      const currentPage = parseInt($('.artdeco-pagination__indicator--number.active').text()) || page;
+      const rawTotalResults = $('.results-context-header__job-count').text();
+      const totalResults = rawTotalResults ? parseInt(rawTotalResults.replace(/\D/g, '')) : null;
+      const rawCurrentPage = $('.artdeco-pagination__indicator--number.active').text();
+      const currentPage = rawCurrentPage ? parseInt(rawCurrentPage) : page;
+
+      // Enrich companies if requested
+      if (enrichCompanies && config.ENABLE_COMPANY_ENRICHMENT) {
+        jobs = await Promise.all(
+          jobs.map(async (job) => {
+            if (job.companyLink) {
+              const companyInfo = await this.companyEnricher.fetchCompanyProfile(job.companyLink);
+              if (companyInfo) {
+                job.companyDetails = companyInfo;
+              }
+            }
+            return job;
+          })
+        );
+      }
 
       const result = {
         success: true,
         totalResults,
         currentPage,
         jobsPerPage: 25,
-        totalPages: Math.ceil(totalResults / 25),
+        totalPages: totalResults ? Math.ceil(totalResults / 25) : null,
         jobs: jobs.slice(0, 25), // Limit to 25 jobs per page
         searchParams: {
           keywords,
           location,
           remote,
-          page
+          page,
+          enrichCompanies
         },
-        timestamp: new Date().toISOString()
+        timestamp: new Date().toISOString(),
+        cacheHit: false
       };
 
       // Cache the result
@@ -217,10 +448,11 @@ class LinkedInScraper {
     }
   }
 
-  async getJobDetails(jobId) {
-    const cacheKey = `job:${jobId}`;
+  async getJobDetails(jobId, enrichCompany = false) {
+    const cacheKey = `job:${jobId}:${enrichCompany}`;
     const cached = cache.get(cacheKey);
     if (cached) {
+      cached.cacheHit = true;
       return cached;
     }
 
@@ -229,29 +461,62 @@ class LinkedInScraper {
       const response = await this.fetchWithRetry(url);
       const $ = cheerio.load(response.data);
 
+      // Extract job details
+      const rawTitle = $('.top-card-layout__title').text();
+      const rawCompany = $('.topcard__org-name-link').text();
+      const rawLocation = $('.topcard__flavor--bullet').first().text();
+      const rawPostedDate = $('.posted-time-ago__text').text();
+      const rawApplicants = $('.num-applicants__caption').text();
+      const rawDescriptionHtml = $('.description__text').html() || $('.show-more-less-html__markup').html();
+      
+      // Get description as plain text
+      const descriptionText = this.htmlToPlainText(rawDescriptionHtml);
+
+      // Extract details using improved method
+      const seniorityLevel = this.extractDetail($, 'Seniority level');
+      const employmentType = this.extractDetail($, 'Employment type');
+      const jobFunction = this.extractDetail($, 'Job function');
+      const industries = this.extractDetail($, 'Industries');
+      
+      const skills = this.extractSkills($);
+      
+      // Get company link
+      const rawCompanyLink = $('.topcard__org-name-link').attr('href');
+      const companyLink = this.cleanText(rawCompanyLink);
+
+      // Prepare job details object
       const jobDetails = {
         id: jobId,
-        title: $('.top-card-layout__title').text().trim(),
-        company: $('.topcard__org-name-link').text().trim(),
-        location: $('.topcard__flavor--bullet').first().text().trim(),
-        postedDate: $('.posted-time-ago__text').text().trim(),
-        applicants: $('.num-applicants__caption').text().trim(),
-        description: $('.description__text').html() || $('.show-more-less-html__markup').html(),
-        seniorityLevel: this.extractDetail($, 'Seniority level'),
-        employmentType: this.extractDetail($, 'Employment type'),
-        jobFunction: this.extractDetail($, 'Job function'),
-        industries: this.extractDetail($, 'Industries'),
-        skills: this.extractSkills($),
-        companyDetails: {
-          name: $('.topcard__org-name-link').text().trim(),
-          link: $('.topcard__org-name-link').attr('href') || '',
-          employees: $('.company-size').text().trim(),
-          about: $('.about-us__description').text().trim(),
+        title: this.cleanText(rawTitle),
+        company: this.cleanText(rawCompany),
+        location: this.cleanText(rawLocation),
+        postedDate: this.cleanText(rawPostedDate),
+        applicants: this.cleanText(rawApplicants),
+        description: {
+          html: this.cleanText(rawDescriptionHtml),
+          text: descriptionText,
+          textLength: descriptionText ? descriptionText.length : null
         },
+        seniorityLevel,
+        employmentType,
+        jobFunction,
+        industries,
+        skills: skills.length > 0 ? skills : null,
+        companyLink,
         link: url,
-        timestamp: new Date().toISOString()
+        timestamp: new Date().toISOString(),
+        cacheHit: false
       };
 
+      // Enrich company info if requested
+      if (enrichCompany && config.ENABLE_COMPANY_ENRICHMENT && companyLink) {
+        const companyInfo = await this.companyEnricher.fetchCompanyProfile(companyLink);
+        if (companyInfo) {
+          jobDetails.companyDetails = companyInfo;
+        }
+      }
+
+      // Cache the result
       cache.set(cacheKey, jobDetails);
       return jobDetails;
 
@@ -262,13 +527,21 @@ class LinkedInScraper {
   }
 
   extractDetail($, label) {
-    return $(`li:contains("${label}")`).find('span').last().text().trim();
+    const element = $(`li:contains("${label}")`);
+    if (element.length) {
+      const text = element.find('span').last().text().trim();
+      return this.cleanText(text);
+    }
+    return null;
   }
 
   extractSkills($) {
     const skills = [];
     $('.job-details-skill-match-status-list__pill').each((i, element) => {
-      skills.push($(element).text().trim());
+      const skill = $(element).text().trim();
+      if (skill) {
+        skills.push(skill);
+      }
     });
     return skills;
   }
@@ -283,14 +556,18 @@ const scraper = new LinkedInScraper();
 app.get('/', (req, res) => {
   res.json({
     name: 'LinkedIn Jobs Scraper API',
-    version: '2.0.0',
+    version: '2.1.0',
     status: 'operational',
+    features: {
+      descriptionText: 'Clean text version of job descriptions',
+      companyEnrichment: 'Premium company details available',
+      nullHandling: 'Empty fields return null instead of empty strings'
+    },
     endpoints: {
-      search: '/api/search?keywords=software+engineer&location=remote&page=1',
-      jobDetails: '/api/job/:jobId',
+      search: '/api/search?keywords=software+engineer&location=remote&page=1&enrichCompanies=true',
+      jobDetails: '/api/job/:jobId?enrichCompany=true',
       health: '/api/health'
     },
-    documentation: 'Add /docs endpoint for documentation',
     cache: {
       enabled: true,
       ttl: `${config.CACHE_TTL} seconds`
@@ -306,7 +583,8 @@ app.get('/api/search', async (req, res) => {
       location = '', 
       page = 1, 
       remote = false,
-      limit = 25
+      limit = 25,
+      enrichCompanies = false
     } = req.query;
 
     // Validation
@@ -328,12 +606,19 @@ app.get('/api/search', async (req, res) => {
       keywords,
       location,
       parseInt(page),
-      remote === 'true'
+      remote === 'true',
+      enrichCompanies === 'true'
     );
 
     // Apply limit if specified
     if (limit && parseInt(limit) < result.jobs.length) {
       result.jobs = result.jobs.slice(0, parseInt(limit));
+    }
+
+    // Add premium feature indicator
+    if (enrichCompanies === 'true') {
+      result.premiumFeature = 'companyEnrichment';
+      result.enrichedCompanies = result.jobs.filter(job => job.companyDetails).length;
     }
 
     res.json(result);
@@ -352,6 +637,7 @@ app.get('/api/search', async (req, res) => {
 app.get('/api/job/:jobId', async (req, res) => {
   try {
     const { jobId } = req.params;
+    const { enrichCompany = false } = req.query;
     
     if (!jobId) {
       return res.status(400).json({
@@ -360,7 +646,10 @@ app.get('/api/job/:jobId', async (req, res) => {
       });
     }
 
-    const jobDetails = await scraper.getJobDetails(jobId);
+    const jobDetails = await scraper.getJobDetails(
+      jobId, 
+      enrichCompany === 'true'
+    );
     
     if (!jobDetails.title) {
       return res.status(404).json({
@@ -369,10 +658,13 @@ app.get('/api/job/:jobId', async (req, res) => {
       });
     }
 
-    res.json({
+    const response = {
       success: true,
-      data: jobDetails
-    });
+      data: jobDetails,
+      premium: enrichCompany === 'true' && jobDetails.companyDetails ? 'companyEnrichment' : null
+    };
+
+    res.json(response);
 
   } catch (error) {
     console.error('Job details error:', error);
@@ -394,7 +686,38 @@ app.get('/api/health', (req, res) => {
     cache: {
       stats: cache.getStats(),
       keys: cache.keys().length
+    },
+    config: {
+      companyEnrichment: config.ENABLE_COMPANY_ENRICHMENT,
+      cacheTtl: config.CACHE_TTL,
+      rateLimit: config.RATE_LIMIT_MAX
     }
+  });
+});
+
+// Premium features endpoint
+app.get('/api/features', (req, res) => {
+  res.json({
+    premiumFeatures: [
+      {
+        name: 'Company Enrichment',
+        description: 'Fetches detailed company information including About section, employee count, headquarters, and more',
+        endpoint: 'Add ?enrichCompany=true to job details endpoint or ?enrichCompanies=true to search endpoint',
+        pricing: 'Premium tier required'
+      },
+      {
+        name: 'Clean Text Descriptions',
+        description: 'Provides both HTML and clean plain text versions of job descriptions',
+        endpoint: 'Available in all job details responses',
+        pricing: 'All tiers'
+      },
+      {
+        name: 'Advanced Null Handling',
+        description: 'Empty fields return null instead of empty strings for cleaner API responses',
+        endpoint: 'All endpoints',
+        pricing: 'All tiers'
+      }
+    ]
   });
 });
 
@@ -403,7 +726,12 @@ app.use((req, res) => {
   res.status(404).json({
     success: false,
     error: 'Endpoint not found',
-    availableEndpoints: ['/api/search', '/api/job/:id', '/api/health']
+    availableEndpoints: [
+      '/api/search',
+      '/api/job/:id', 
+      '/api/health',
+      '/api/features'
+    ]
   });
 });
 
@@ -422,18 +750,25 @@ app.use((err, req, res, next) => {
 // ====================
 app.listen(PORT, () => {
   console.log(`
-    🚀 LinkedIn Jobs Scraper API is running!
+    🚀 LinkedIn Jobs Scraper API v2.1.0
     
     Port: ${PORT}
     Environment: ${process.env.NODE_ENV || 'development'}
+    
+    New Features:
+    ✅ Clean text descriptions
+    ✅ Company enrichment (premium)
+    ✅ Null handling for empty fields
+    
     Cache TTL: ${config.CACHE_TTL} seconds
     Rate Limit: ${config.RATE_LIMIT_MAX} requests per 15 minutes
     
     Endpoints:
     - GET /                   : API info
-    - GET /api/search         : Search jobs
-    - GET /api/job/:jobId     : Get job details
+    - GET /api/search         : Search jobs (add ?enrichCompanies=true)
+    - GET /api/job/:jobId     : Get job details (add ?enrichCompany=true)
     - GET /api/health         : Health check
+    - GET /api/features       : Premium features info
   `);
 });
 
