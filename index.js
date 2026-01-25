@@ -28,8 +28,10 @@ const config = {
   RATE_LIMIT_WINDOW: 15 * 60 * 1000, // 15 minutes
   RATE_LIMIT_MAX: 100, // requests per window
   
-  // Company enrichment (premium feature)
-  ENABLE_COMPANY_ENRICHMENT: true,
+  // Limits
+  MAX_PAGE: 10,
+  MAX_RESULTS_PER_PAGE: 50,
+  DEFAULT_RESULTS_PER_PAGE: 25,
 };
 
 // ====================
@@ -77,8 +79,10 @@ const rateLimiter = (req, res, next) => {
   
   if (limitInfo.count >= config.RATE_LIMIT_MAX) {
     return res.status(429).json({
+      success: false,
       error: 'Too many requests',
-      retryAfter: Math.ceil((limitInfo.resetTime - Date.now()) / 1000)
+      retryAfter: Math.ceil((limitInfo.resetTime - Date.now()) / 1000),
+      timestamp: new Date().toISOString()
     });
   }
   
@@ -134,7 +138,6 @@ class CompanyEnricher {
     }
 
     try {
-      // Ensure we have the full URL
       let fullUrl = companyUrl;
       if (!companyUrl.startsWith('http')) {
         fullUrl = `${config.LINKEDIN_BASE_URL}${companyUrl}`;
@@ -147,7 +150,6 @@ class CompanyEnricher {
 
       const $ = cheerio.load(response.data);
       
-      // Extract company information
       const companyInfo = {
         about: this.extractCompanyAbout($),
         employeeCount: this.extractEmployeeCount($),
@@ -158,7 +160,6 @@ class CompanyEnricher {
         specialties: this.extractSpecialties($),
       };
 
-      // Only cache if we got some data
       if (companyInfo.about || companyInfo.employeeCount) {
         cache.set(cacheKey, companyInfo);
       }
@@ -178,7 +179,6 @@ class CompanyEnricher {
       return text || null;
     }
     
-    // Alternative selectors
     const selectors = [
       '.about-us__description',
       '.org-about-module__description',
@@ -198,7 +198,6 @@ class CompanyEnricher {
   }
 
   extractEmployeeCount($) {
-    // Try multiple selectors for employee count
     const selectors = [
       'dt:contains("Company size") + dd',
       'dt:contains("Employees") + dd',
@@ -218,7 +217,6 @@ class CompanyEnricher {
   }
 
   cleanEmployeeCount(text) {
-    // Extract numbers and format
     const match = text.match(/(\d+(?:,\d+)*(?:\.\d+)?)/);
     if (match) {
       return match[0].replace(/,/g, '');
@@ -299,33 +297,25 @@ class LinkedInScraper {
     }
   }
 
-  // Helper to clean text and handle null
   cleanText(text) {
     if (!text || typeof text !== 'string') return null;
     const cleaned = text.trim().replace(/\s+/g, ' ');
     return cleaned || null;
   }
 
-  // Convert HTML to plain text
   htmlToPlainText(html) {
     if (!html) return null;
     
     try {
       const $ = cheerio.load(html);
-      
-      // Remove script and style elements
       $('script, style, noscript, iframe, embed, object').remove();
       
-      // Get text and clean it
       let text = $.text();
-      
-      // Clean up whitespace
       text = text.replace(/\s+/g, ' ')
                 .replace(/\n+/g, '\n')
                 .replace(/\t+/g, ' ')
                 .trim();
       
-      // Remove excessive line breaks
       text = text.replace(/\n{3,}/g, '\n\n');
       
       return text || null;
@@ -338,7 +328,6 @@ class LinkedInScraper {
   parseJobElement($, element) {
     const $element = $(element);
     
-    // Get raw values first
     const rawTitle = $element.find('.base-search-card__title').text();
     const rawCompany = $element.find('.base-search-card__subtitle').text();
     const rawLocation = $element.find('.job-search-card__location').text();
@@ -364,21 +353,24 @@ class LinkedInScraper {
     };
   }
 
-  async searchJobs(keywords, location = '', page = 1, remote = false, enrichCompanies = false) {
+  async searchJobs(keywords, location = '', page = 1, limit = config.DEFAULT_RESULTS_PER_PAGE, remote = false, enrichCompanies = false) {
+    // Validate inputs
+    page = Math.min(Math.max(parseInt(page) || 1, 1), config.MAX_PAGE);
+    limit = Math.min(Math.max(parseInt(limit) || config.DEFAULT_RESULTS_PER_PAGE, 1), config.MAX_RESULTS_PER_PAGE);
+    
     const params = new URLSearchParams({
       keywords: keywords,
       location: location,
       start: (page - 1) * 25,
-      ...(remote && { f_WT: 2 }) // Remote filter
+      ...(remote && { f_WT: 2 })
     });
 
     const url = `${config.JOBS_SEARCH_URL}?${params.toString()}`;
-    const cacheKey = `jobs:${url}:${enrichCompanies}`;
+    const cacheKey = `jobs:${keywords}:${location}:${page}:${limit}:${remote}:${enrichCompanies}`;
 
-    // Check cache
     const cached = cache.get(cacheKey);
     if (cached) {
-      console.log('Cache hit for:', cacheKey);
+      cached.cacheHit = true;
       return cached;
     }
 
@@ -399,6 +391,9 @@ class LinkedInScraper {
         }
       });
 
+      // Apply limit
+      jobs = jobs.slice(0, limit);
+
       // Extract pagination info
       const rawTotalResults = $('.results-context-header__job-count').text();
       const totalResults = rawTotalResults ? parseInt(rawTotalResults.replace(/\D/g, '')) : null;
@@ -406,7 +401,7 @@ class LinkedInScraper {
       const currentPage = rawCurrentPage ? parseInt(rawCurrentPage) : page;
 
       // Enrich companies if requested
-      if (enrichCompanies && config.ENABLE_COMPANY_ENRICHMENT) {
+      if (enrichCompanies) {
         jobs = await Promise.all(
           jobs.map(async (job) => {
             if (job.companyLink) {
@@ -424,21 +419,20 @@ class LinkedInScraper {
         success: true,
         totalResults,
         currentPage,
-        jobsPerPage: 25,
-        totalPages: totalResults ? Math.ceil(totalResults / 25) : null,
-        jobs: jobs.slice(0, 25), // Limit to 25 jobs per page
+        jobsPerPage: limit,
+        totalPages: totalResults ? Math.ceil(totalResults / limit) : null,
+        jobs: jobs,
         searchParams: {
           keywords,
           location,
-          remote,
           page,
-          enrichCompanies
+          limit,
+          remote
         },
         timestamp: new Date().toISOString(),
         cacheHit: false
       };
 
-      // Cache the result
       cache.set(cacheKey, result);
       return result;
 
@@ -469,10 +463,8 @@ class LinkedInScraper {
       const rawApplicants = $('.num-applicants__caption').text();
       const rawDescriptionHtml = $('.description__text').html() || $('.show-more-less-html__markup').html();
       
-      // Get description as plain text
       const descriptionText = this.htmlToPlainText(rawDescriptionHtml);
 
-      // Extract details using improved method
       const seniorityLevel = this.extractDetail($, 'Seniority level');
       const employmentType = this.extractDetail($, 'Employment type');
       const jobFunction = this.extractDetail($, 'Job function');
@@ -480,11 +472,9 @@ class LinkedInScraper {
       
       const skills = this.extractSkills($);
       
-      // Get company link
       const rawCompanyLink = $('.topcard__org-name-link').attr('href');
       const companyLink = this.cleanText(rawCompanyLink);
 
-      // Prepare job details object
       const jobDetails = {
         id: jobId,
         title: this.cleanText(rawTitle),
@@ -509,14 +499,13 @@ class LinkedInScraper {
       };
 
       // Enrich company info if requested
-      if (enrichCompany && config.ENABLE_COMPANY_ENRICHMENT && companyLink) {
+      if (enrichCompany && companyLink) {
         const companyInfo = await this.companyEnricher.fetchCompanyProfile(companyLink);
         if (companyInfo) {
           jobDetails.companyDetails = companyInfo;
         }
       }
 
-      // Cache the result
       cache.set(cacheKey, jobDetails);
       return jobDetails;
 
@@ -551,75 +540,107 @@ class LinkedInScraper {
 const scraper = new LinkedInScraper();
 
 // ====================
-// API Routes
+// API Routes - Professional RESTful Design
 // ====================
 app.get('/', (req, res) => {
   res.json({
     name: 'LinkedIn Jobs Scraper API',
-    version: '2.1.0',
+    version: '2.2.0',
     status: 'operational',
-    features: {
-      descriptionText: 'Clean text version of job descriptions',
-      companyEnrichment: 'Premium company details available',
-      nullHandling: 'Empty fields return null instead of empty strings'
-    },
+    documentation: 'Professional RESTful API for LinkedIn job data',
     endpoints: {
-      search: '/api/search?keywords=software+engineer&location=remote&page=1&enrichCompanies=true',
-      jobDetails: '/api/job/:jobId?enrichCompany=true',
-      health: '/api/health'
+      search: 'GET /api/search/{keywords}/{location}',
+      jobDetails: 'GET /api/job/{jobId}',
+      examples: [
+        '/api/search/software%20engineer/remote',
+        '/api/search/data%20scientist/San%20Francisco',
+        '/api/job/3796675744'
+      ]
     },
-    cache: {
-      enabled: true,
-      ttl: `${config.CACHE_TTL} seconds`
-    }
+    features: [
+      'Clean text descriptions',
+      'Structured job data',
+      'Null-safe responses',
+      'Rate limited',
+      'Cached responses'
+    ]
   });
 });
 
-// Search jobs endpoint
-app.get('/api/search', async (req, res) => {
+// Professional RESTful Search Endpoint
+app.get('/api/search/:keywords/:location', async (req, res) => {
   try {
-    const { 
-      keywords = '', 
-      location = '', 
-      page = 1, 
-      remote = false,
-      limit = 25,
-      enrichCompanies = false
-    } = req.query;
+    // Decode URL parameters
+    const keywords = decodeURIComponent(req.params.keywords || '');
+    const location = decodeURIComponent(req.params.location || '');
+    
+    // Get query parameters with defaults
+    const page = parseInt(req.query.page) || 1;
+    const limit = parseInt(req.query.limit) || config.DEFAULT_RESULTS_PER_PAGE;
+    const remote = req.query.remote === 'true';
+    const enrichCompanies = req.query.enrichCompanies === 'true';
 
-    // Validation
+    // Validate required parameters
     if (!keywords.trim()) {
       return res.status(400).json({
         success: false,
-        error: 'Keywords parameter is required'
+        error: 'Keywords parameter is required',
+        timestamp: new Date().toISOString()
       });
     }
 
-    if (page < 1 || page > 10) {
+    if (!location.trim()) {
       return res.status(400).json({
         success: false,
-        error: 'Page must be between 1 and 10'
+        error: 'Location parameter is required',
+        timestamp: new Date().toISOString()
+      });
+    }
+
+    // Validate limits
+    if (page < 1 || page > config.MAX_PAGE) {
+      return res.status(400).json({
+        success: false,
+        error: `Page must be between 1 and ${config.MAX_PAGE}`,
+        timestamp: new Date().toISOString()
+      });
+    }
+
+    if (limit < 1 || limit > config.MAX_RESULTS_PER_PAGE) {
+      return res.status(400).json({
+        success: false,
+        error: `Limit must be between 1 and ${config.MAX_RESULTS_PER_PAGE}`,
+        timestamp: new Date().toISOString()
       });
     }
 
     const result = await scraper.searchJobs(
       keywords,
       location,
-      parseInt(page),
-      remote === 'true',
-      enrichCompanies === 'true'
+      page,
+      limit,
+      remote,
+      enrichCompanies
     );
 
-    // Apply limit if specified
-    if (limit && parseInt(limit) < result.jobs.length) {
-      result.jobs = result.jobs.slice(0, parseInt(limit));
-    }
-
-    // Add premium feature indicator
-    if (enrichCompanies === 'true') {
-      result.premiumFeature = 'companyEnrichment';
-      result.enrichedCompanies = result.jobs.filter(job => job.companyDetails).length;
-    }
+    // Add pagination links for better RESTful design
+    const baseUrl = `${req.protocol}://${req.get('host')}${req.baseUrl}`;
+    const encodedKeywords = encodeURIComponent(keywords);
+    const encodedLocation = encodeURIComponent(location);
+    
+    result.links = {
+      self: `${baseUrl}/search/${encodedKeywords}/${encodedLocation}?page=${page}&limit=${limit}&remote=${remote}`,
+      first: `${baseUrl}/search/${encodedKeywords}/${encodedLocation}?page=1&limit=${limit}&remote=${remote}`,
+      last: result.totalPages ? 
+        `${baseUrl}/search/${encodedKeywords}/${encodedLocation}?page=${result.totalPages}&limit=${limit}&remote=${remote}` : 
+        null,
+      next: result.totalPages && page < result.totalPages ? 
+        `${baseUrl}/search/${encodedKeywords}/${encodedLocation}?page=${page + 1}&limit=${limit}&remote=${remote}` : 
+        null,
+      prev: page > 1 ? 
+        `${baseUrl}/search/${encodedKeywords}/${encodedLocation}?page=${page - 1}&limit=${limit}&remote=${remote}` : 
+        null
+    };
 
     res.json(result);
 
@@ -633,16 +654,26 @@ app.get('/api/search', async (req, res) => {
   }
 });
 
-// Get job details endpoint
+// Professional RESTful Job Details Endpoint
 app.get('/api/job/:jobId', async (req, res) => {
   try {
     const { jobId } = req.params;
     const { enrichCompany = false } = req.query;
     
-    if (!jobId) {
+    if (!jobId || !jobId.trim()) {
       return res.status(400).json({
         success: false,
-        error: 'Job ID is required'
+        error: 'Job ID is required',
+        timestamp: new Date().toISOString()
+      });
+    }
+
+    // Validate job ID format (should be numeric)
+    if (!/^\d+$/.test(jobId)) {
+      return res.status(400).json({
+        success: false,
+        error: 'Invalid Job ID format. Job ID should be numeric.',
+        timestamp: new Date().toISOString()
       });
     }
 
@@ -654,84 +685,68 @@ app.get('/api/job/:jobId', async (req, res) => {
     if (!jobDetails.title) {
       return res.status(404).json({
         success: false,
-        error: 'Job not found'
+        error: 'Job not found or no longer available',
+        timestamp: new Date().toISOString()
       });
     }
 
     const response = {
       success: true,
       data: jobDetails,
-      premium: enrichCompany === 'true' && jobDetails.companyDetails ? 'companyEnrichment' : null
+      links: {
+        self: `${req.protocol}://${req.get('host')}${req.baseUrl}/job/${jobId}`,
+        linkedin: jobDetails.link
+      }
     };
 
     res.json(response);
 
   } catch (error) {
     console.error('Job details error:', error);
-    res.status(500).json({
+    
+    // Provide more specific error messages
+    let statusCode = 500;
+    let errorMessage = error.message;
+    
+    if (error.message.includes('404') || error.message.includes('not found')) {
+      statusCode = 404;
+      errorMessage = 'Job not found or no longer available on LinkedIn';
+    } else if (error.message.includes('timeout')) {
+      statusCode = 408;
+      errorMessage = 'Request timeout. LinkedIn may be rate limiting requests.';
+    } else if (error.message.includes('blocked') || error.message.includes('access denied')) {
+      statusCode = 403;
+      errorMessage = 'Access to LinkedIn blocked. Try again later.';
+    }
+    
+    res.status(statusCode).json({
       success: false,
-      error: error.message,
+      error: errorMessage,
       timestamp: new Date().toISOString()
     });
   }
 });
 
-// Health check endpoint
-app.get('/api/health', (req, res) => {
-  res.json({
-    status: 'healthy',
-    timestamp: new Date().toISOString(),
-    uptime: process.uptime(),
-    memory: process.memoryUsage(),
-    cache: {
-      stats: cache.getStats(),
-      keys: cache.keys().length
-    },
-    config: {
-      companyEnrichment: config.ENABLE_COMPANY_ENRICHMENT,
-      cacheTtl: config.CACHE_TTL,
-      rateLimit: config.RATE_LIMIT_MAX
-    }
-  });
-});
-
-// Premium features endpoint
-app.get('/api/features', (req, res) => {
-  res.json({
-    premiumFeatures: [
-      {
-        name: 'Company Enrichment',
-        description: 'Fetches detailed company information including About section, employee count, headquarters, and more',
-        endpoint: 'Add ?enrichCompany=true to job details endpoint or ?enrichCompanies=true to search endpoint',
-        pricing: 'Premium tier required'
-      },
-      {
-        name: 'Clean Text Descriptions',
-        description: 'Provides both HTML and clean plain text versions of job descriptions',
-        endpoint: 'Available in all job details responses',
-        pricing: 'All tiers'
-      },
-      {
-        name: 'Advanced Null Handling',
-        description: 'Empty fields return null instead of empty strings for cleaner API responses',
-        endpoint: 'All endpoints',
-        pricing: 'All tiers'
-      }
-    ]
-  });
-});
-
-// 404 handler
+// 404 handler for undefined routes
 app.use((req, res) => {
   res.status(404).json({
     success: false,
     error: 'Endpoint not found',
     availableEndpoints: [
-      '/api/search',
-      '/api/job/:id', 
-      '/api/health',
-      '/api/features'
-    ]
+      {
+        method: 'GET',
+        path: '/api/search/{keywords}/{location}',
+        description: 'Search jobs by keywords and location',
+        example: '/api/search/software%20engineer/remote'
+      },
+      {
+        method: 'GET',
+        path: '/api/job/{jobId}',
+        description: 'Get detailed information about a specific job',
+        example: '/api/job/3796675744'
+      }
+    ],
+    timestamp: new Date().toISOString()
   });
 });
 
@@ -741,7 +756,8 @@ app.use((err, req, res, next) => {
   res.status(500).json({
     success: false,
     error: 'Internal server error',
-    requestId: req.headers['x-request-id'] || uuidv4()
+    requestId: req.headers['x-request-id'] || uuidv4(),
+    timestamp: new Date().toISOString()
   });
 });
 
@@ -750,25 +766,25 @@ app.use((err, req, res, next) => {
 // ====================
 app.listen(PORT, () => {
   console.log(`
-    🚀 LinkedIn Jobs Scraper API v2.1.0
+    🚀 LinkedIn Jobs Scraper API v2.2.0
     
     Port: ${PORT}
     Environment: ${process.env.NODE_ENV || 'development'}
     
-    New Features:
-    ✅ Clean text descriptions
-    ✅ Company enrichment (premium)
-    ✅ Null handling for empty fields
+    Professional RESTful Endpoints:
+    ✅ GET /api/search/{keywords}/{location}
+    ✅ GET /api/job/{jobId}
     
-    Cache TTL: ${config.CACHE_TTL} seconds
-    Rate Limit: ${config.RATE_LIMIT_MAX} requests per 15 minutes
+    Configuration:
+    • Cache TTL: ${config.CACHE_TTL} seconds
+    • Rate Limit: ${config.RATE_LIMIT_MAX} requests per 15 minutes
+    • Max Results: ${config.MAX_RESULTS_PER_PAGE} per page
+    • Max Pages: ${config.MAX_PAGE}
     
-    Endpoints:
-    - GET /                   : API info
-    - GET /api/search         : Search jobs (add ?enrichCompanies=true)
-    - GET /api/job/:jobId     : Get job details (add ?enrichCompany=true)
-    - GET /api/health         : Health check
-    - GET /api/features       : Premium features info
+    Examples:
+    • http://localhost:${PORT}/api/search/software%20engineer/remote
+    • http://localhost:${PORT}/api/search/data%20scientist/San%20Francisco?page=2&limit=30
+    • http://localhost:${PORT}/api/job/3796675744
   `);
 });
 
