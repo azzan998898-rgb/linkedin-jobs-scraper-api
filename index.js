@@ -369,14 +369,26 @@ class LinkedInScraper {
     const hasEasyApply = $element.find('.simple-job-card__link').length > 0;
     const rawInsights = $element.find('.job-search-card__insight').text();
     
+    // Clean company link to remove tracking parameters
+    let cleanedCompanyLink = this.cleanText(rawCompanyLink);
+    if (cleanedCompanyLink && cleanedCompanyLink.includes('?')) {
+      cleanedCompanyLink = cleanedCompanyLink.split('?')[0];
+    }
+    
+    // Ensure LinkedIn links are complete
+    let jobLink = this.cleanText(rawLink);
+    if (jobLink && !jobLink.startsWith('http')) {
+      jobLink = `https://www.linkedin.com${jobLink}`;
+    }
+    
     return {
       id: $element.attr('data-id') || uuidv4(),
       title: this.cleanText(rawTitle),
       company: this.cleanText(rawCompany),
       location: this.cleanText(rawLocation),
       date: this.cleanText(rawDate),
-      link: this.cleanText(rawLink),
-      companyLink: this.cleanText(rawCompanyLink),
+      link: jobLink, // Full LinkedIn job URL
+      companyLink: cleanedCompanyLink,
       companyLogo: this.cleanText(rawCompanyLogo),
       easyApply: hasEasyApply || null,
       insights: this.cleanText(rawInsights),
@@ -447,11 +459,13 @@ class LinkedInScraper {
 
       const result = {
         success: true,
-        totalResults,
-        currentPage,
-        jobsPerPage: limit,
-        totalPages: totalResults ? Math.ceil(totalResults / limit) : null,
-        jobs: jobs,
+        data: {
+          totalResults,
+          currentPage,
+          jobsPerPage: limit,
+          totalPages: totalResults ? Math.ceil(totalResults / limit) : null,
+          jobs: jobs
+        },
         searchParams: {
           keywords,
           location,
@@ -459,8 +473,7 @@ class LinkedInScraper {
           limit,
           remote
         },
-        timestamp: new Date().toISOString(),
-        cacheHit: false
+        timestamp: new Date().toISOString()
       };
 
       cache.set(cacheKey, result);
@@ -524,11 +537,10 @@ class LinkedInScraper {
         industries,
         skills: skills.length > 0 ? skills : null,
         salary: salaryInfo,
-        companyLink,
-        jobLink: url,
+        companyLink: companyLink,
+        jobLink: url, // Keep the LinkedIn job URL
         source: 'linkedin',
-        timestamp: new Date().toISOString(),
-        cacheHit: false
+        timestamp: new Date().toISOString()
       };
 
       // Enrich company info if requested
@@ -594,35 +606,29 @@ class LinkedInScraper {
 const scraper = new LinkedInScraper();
 
 // ====================
-// API Routes - Professional RESTful Design
+// API Routes - Clean Professional Design
 // ====================
 app.get('/', (req, res) => {
   res.json({
     name: 'LinkedIn Jobs Scraper API',
-    version: '2.3.0',
+    version: '2.5.0',
     status: 'operational',
-    description: 'Professional API for LinkedIn job data with clean text descriptions',
-    endpoints: {
-      search: 'GET /api/search/{keywords}/{location}',
-      jobDetails: 'GET /api/job/{jobId}',
-      examples: [
-        '/api/search/software%20engineer/remote',
-        '/api/search/data%20scientist/San%20Francisco',
-        '/api/job/3796675744'
-      ]
-    },
-    features: [
-      'Clean text job descriptions',
-      'Professional data formatting',
-      'Null-safe responses',
-      'Rate limiting',
-      'Response caching'
-    ],
-    documentation: 'https://rapidapi.com/...'
+    endpoints: [
+      {
+        method: 'GET',
+        path: '/api/search/{keywords}/{location}',
+        description: 'Search LinkedIn jobs by keywords and location'
+      },
+      {
+        method: 'GET',
+        path: '/api/job/{jobId}',
+        description: 'Get detailed information about a LinkedIn job'
+      }
+    ]
   });
 });
 
-// Professional RESTful Search Endpoint
+// Search Jobs Endpoint
 app.get('/api/search/:keywords/:location', async (req, res) => {
   try {
     // Decode URL parameters
@@ -639,16 +645,14 @@ app.get('/api/search/:keywords/:location', async (req, res) => {
     if (!keywords.trim()) {
       return res.status(400).json({
         success: false,
-        error: 'Keywords parameter is required',
-        timestamp: new Date().toISOString()
+        error: 'Keywords parameter is required'
       });
     }
 
     if (!location.trim()) {
       return res.status(400).json({
         success: false,
-        error: 'Location parameter is required',
-        timestamp: new Date().toISOString()
+        error: 'Location parameter is required'
       });
     }
 
@@ -656,16 +660,14 @@ app.get('/api/search/:keywords/:location', async (req, res) => {
     if (page < 1 || page > config.MAX_PAGE) {
       return res.status(400).json({
         success: false,
-        error: `Page must be between 1 and ${config.MAX_PAGE}`,
-        timestamp: new Date().toISOString()
+        error: `Page must be between 1 and ${config.MAX_PAGE}`
       });
     }
 
     if (limit < 1 || limit > config.MAX_RESULTS_PER_PAGE) {
       return res.status(400).json({
         success: false,
-        error: `Limit must be between 1 and ${config.MAX_RESULTS_PER_PAGE}`,
-        timestamp: new Date().toISOString()
+        error: `Limit must be between 1 and ${config.MAX_RESULTS_PER_PAGE}`
       });
     }
 
@@ -678,38 +680,21 @@ app.get('/api/search/:keywords/:location', async (req, res) => {
       enrichCompanies
     );
 
-    // Add pagination links for better RESTful design
-    const baseUrl = `${req.protocol}://${req.get('host')}${req.baseUrl}`;
-    const encodedKeywords = encodeURIComponent(keywords);
-    const encodedLocation = encodeURIComponent(location);
+    // Remove any internal indicators and API server links
+    delete result.cacheHit;
     
-    result.links = {
-      self: `${baseUrl}/search/${encodedKeywords}/${encodedLocation}?page=${page}&limit=${limit}&remote=${remote}`,
-      first: `${baseUrl}/search/${encodedKeywords}/${encodedLocation}?page=1&limit=${limit}&remote=${remote}`,
-      last: result.totalPages ? 
-        `${baseUrl}/search/${encodedKeywords}/${encodedLocation}?page=${result.totalPages}&limit=${limit}&remote=${remote}` : 
-        null,
-      next: result.totalPages && page < result.totalPages ? 
-        `${baseUrl}/search/${encodedKeywords}/${encodedLocation}?page=${page + 1}&limit=${limit}&remote=${remote}` : 
-        null,
-      prev: page > 1 ? 
-        `${baseUrl}/search/${encodedKeywords}/${encodedLocation}?page=${page - 1}&limit=${limit}&remote=${remote}` : 
-        null
-    };
-
     res.json(result);
 
   } catch (error) {
     console.error('Search error:', error);
     res.status(500).json({
       success: false,
-      error: error.message,
-      timestamp: new Date().toISOString()
+      error: error.message
     });
   }
 });
 
-// Professional RESTful Job Details Endpoint
+// Job Details Endpoint
 app.get('/api/job/:jobId', async (req, res) => {
   try {
     const { jobId } = req.params;
@@ -718,8 +703,7 @@ app.get('/api/job/:jobId', async (req, res) => {
     if (!jobId || !jobId.trim()) {
       return res.status(400).json({
         success: false,
-        error: 'Job ID is required',
-        timestamp: new Date().toISOString()
+        error: 'Job ID is required'
       });
     }
 
@@ -727,8 +711,7 @@ app.get('/api/job/:jobId', async (req, res) => {
     if (!/^\d+$/.test(jobId)) {
       return res.status(400).json({
         success: false,
-        error: 'Invalid Job ID format. Job ID should be numeric.',
-        timestamp: new Date().toISOString()
+        error: 'Invalid Job ID format. Job ID should be numeric.'
       });
     }
 
@@ -740,23 +723,17 @@ app.get('/api/job/:jobId', async (req, res) => {
     if (!jobDetails.title) {
       return res.status(404).json({
         success: false,
-        error: 'Job not found or no longer available',
-        timestamp: new Date().toISOString()
+        error: 'Job not found or no longer available'
       });
     }
 
+    // Remove only internal cache indicator
+    delete jobDetails.cacheHit;
+    // KEEP jobLink - this is the LinkedIn URL
+    
     const response = {
       success: true,
-      data: jobDetails,
-      metadata: {
-        source: 'linkedin',
-        retrievedAt: new Date().toISOString(),
-        jobId: jobId
-      },
-      links: {
-        self: `${req.protocol}://${req.get('host')}${req.baseUrl}/job/${jobId}`,
-        linkedin: jobDetails.jobLink
-      }
+      data: jobDetails
     };
 
     res.json(response);
@@ -781,8 +758,7 @@ app.get('/api/job/:jobId', async (req, res) => {
     
     res.status(statusCode).json({
       success: false,
-      error: errorMessage,
-      timestamp: new Date().toISOString()
+      error: errorMessage
     });
   }
 });
@@ -797,27 +773,15 @@ app.use((req, res) => {
         method: 'GET',
         path: '/api/search/{keywords}/{location}',
         description: 'Search jobs by keywords and location',
-        parameters: {
-          keywords: 'Job search terms (URL encoded)',
-          location: 'Job location (URL encoded)',
-          page: 'Page number (optional, default: 1)',
-          limit: 'Results per page (optional, default: 25)',
-          remote: 'Filter for remote jobs only (optional)'
-        },
         example: '/api/search/software%20engineer/remote?page=1&limit=25'
       },
       {
         method: 'GET',
         path: '/api/job/{jobId}',
         description: 'Get detailed information about a specific job',
-        parameters: {
-          jobId: 'LinkedIn job posting ID',
-          enrichCompany: 'Get additional company details (optional)'
-        },
         example: '/api/job/3796675744'
       }
-    ],
-    timestamp: new Date().toISOString()
+    ]
   });
 });
 
@@ -826,9 +790,7 @@ app.use((err, req, res, next) => {
   console.error('Server error:', err);
   res.status(500).json({
     success: false,
-    error: 'Internal server error',
-    requestId: req.headers['x-request-id'] || uuidv4(),
-    timestamp: new Date().toISOString()
+    error: 'Internal server error'
   });
 });
 
@@ -837,30 +799,27 @@ app.use((err, req, res, next) => {
 // ====================
 app.listen(PORT, () => {
   console.log(`
-    🚀 LinkedIn Jobs Scraper API v2.3.0
+    🚀 LinkedIn Jobs Scraper API v2.5.0
     
     Port: ${PORT}
     Environment: ${process.env.NODE_ENV || 'development'}
     
-    Professional RESTful Endpoints:
+    Clean Professional Endpoints:
     ✅ GET /api/search/{keywords}/{location}
     ✅ GET /api/job/{jobId}
     
     Key Features:
-    • Clean text descriptions only (no HTML)
+    • No Vercel/API server links in responses
+    • LinkedIn URLs preserved (jobLink, companyLink)
+    • Clean text descriptions only
     • Professional response formatting
-    • Salary extraction when available
-    • Enhanced text cleaning
     
     Configuration:
     • Cache TTL: ${config.CACHE_TTL} seconds
     • Rate Limit: ${config.RATE_LIMIT_MAX} requests per 15 minutes
     • Max Results: ${config.MAX_RESULTS_PER_PAGE} per page
     
-    Examples:
-    • http://localhost:${PORT}/api/search/software%20engineer/remote
-    • http://localhost:${PORT}/api/search/data%20scientist/San%20Francisco?page=2
-    • http://localhost:${PORT}/api/job/3796675744
+    Ready for RapidAPI deployment!
   `);
 });
 
