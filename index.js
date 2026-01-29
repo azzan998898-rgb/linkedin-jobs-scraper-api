@@ -308,15 +308,45 @@ class LinkedInScraper {
     
     try {
       const $ = cheerio.load(html);
-      $('script, style, noscript, iframe, embed, object').remove();
       
+      // Remove unwanted elements
+      $('script, style, noscript, iframe, embed, object, header, footer, nav').remove();
+      
+      // Get text content
       let text = $.text();
-      text = text.replace(/\s+/g, ' ')
-                .replace(/\n+/g, '\n')
-                .replace(/\t+/g, ' ')
-                .trim();
       
-      text = text.replace(/\n{3,}/g, '\n\n');
+      // Clean up the text
+      text = text
+        .replace(/\s+/g, ' ')
+        .replace(/\n+/g, '\n')
+        .replace(/\t+/g, ' ')
+        .replace(/[ \t]+/g, ' ')
+        .trim();
+      
+      // Remove excessive line breaks and normalize
+      text = text
+        .split('\n')
+        .map(line => line.trim())
+        .filter(line => line.length > 0)
+        .join('\n\n');
+      
+      // Remove common LinkedIn-specific clutter
+      const clutterPatterns = [
+        /See who you know at.*$/m,
+        /Promoted|Sponsored/g,
+        /^[•\-*]\s*/gm,
+        /\s*…\s*See more\s*/g,
+      ];
+      
+      clutterPatterns.forEach(pattern => {
+        text = text.replace(pattern, '');
+      });
+      
+      // Clean up any remaining artifacts
+      text = text
+        .replace(/\n{3,}/g, '\n\n')
+        .replace(/^\s+|\s+$/g, '')
+        .replace(/(\n\s*){2,}/g, '\n\n');
       
       return text || null;
     } catch (error) {
@@ -463,6 +493,7 @@ class LinkedInScraper {
       const rawApplicants = $('.num-applicants__caption').text();
       const rawDescriptionHtml = $('.description__text').html() || $('.show-more-less-html__markup').html();
       
+      // Convert HTML to clean plain text only
       const descriptionText = this.htmlToPlainText(rawDescriptionHtml);
 
       const seniorityLevel = this.extractDetail($, 'Seniority level');
@@ -475,6 +506,9 @@ class LinkedInScraper {
       const rawCompanyLink = $('.topcard__org-name-link').attr('href');
       const companyLink = this.cleanText(rawCompanyLink);
 
+      // Extract salary if available
+      const salaryInfo = this.extractSalary($);
+
       const jobDetails = {
         id: jobId,
         title: this.cleanText(rawTitle),
@@ -482,18 +516,17 @@ class LinkedInScraper {
         location: this.cleanText(rawLocation),
         postedDate: this.cleanText(rawPostedDate),
         applicants: this.cleanText(rawApplicants),
-        description: {
-          html: this.cleanText(rawDescriptionHtml),
-          text: descriptionText,
-          textLength: descriptionText ? descriptionText.length : null
-        },
+        description: descriptionText,
+        descriptionLength: descriptionText ? descriptionText.length : null,
         seniorityLevel,
         employmentType,
         jobFunction,
         industries,
         skills: skills.length > 0 ? skills : null,
+        salary: salaryInfo,
         companyLink,
-        link: url,
+        jobLink: url,
+        source: 'linkedin',
         timestamp: new Date().toISOString(),
         cacheHit: false
       };
@@ -534,6 +567,27 @@ class LinkedInScraper {
     });
     return skills;
   }
+
+  extractSalary($) {
+    const salaryElement = $('.salary');
+    if (salaryElement.length) {
+      const salaryText = salaryElement.text().trim();
+      if (salaryText) {
+        // Try to extract numeric salary ranges
+        const matches = salaryText.match(/(\$[\d,]+(?:\.\d{2})?)(?:\s*-\s*\$([\d,]+(?:\.\d{2})?))?/);
+        if (matches) {
+          return {
+            text: salaryText,
+            min: matches[1] ? matches[1].replace(/[^\d.]/g, '') : null,
+            max: matches[2] ? matches[2].replace(/[^\d.]/g, '') : null,
+            currency: 'USD'
+          };
+        }
+        return { text: salaryText };
+      }
+    }
+    return null;
+  }
 }
 
 // Initialize scraper
@@ -545,9 +599,9 @@ const scraper = new LinkedInScraper();
 app.get('/', (req, res) => {
   res.json({
     name: 'LinkedIn Jobs Scraper API',
-    version: '2.2.0',
+    version: '2.3.0',
     status: 'operational',
-    documentation: 'Professional RESTful API for LinkedIn job data',
+    description: 'Professional API for LinkedIn job data with clean text descriptions',
     endpoints: {
       search: 'GET /api/search/{keywords}/{location}',
       jobDetails: 'GET /api/job/{jobId}',
@@ -558,12 +612,13 @@ app.get('/', (req, res) => {
       ]
     },
     features: [
-      'Clean text descriptions',
-      'Structured job data',
+      'Clean text job descriptions',
+      'Professional data formatting',
       'Null-safe responses',
-      'Rate limited',
-      'Cached responses'
-    ]
+      'Rate limiting',
+      'Response caching'
+    ],
+    documentation: 'https://rapidapi.com/...'
   });
 });
 
@@ -693,9 +748,14 @@ app.get('/api/job/:jobId', async (req, res) => {
     const response = {
       success: true,
       data: jobDetails,
+      metadata: {
+        source: 'linkedin',
+        retrievedAt: new Date().toISOString(),
+        jobId: jobId
+      },
       links: {
         self: `${req.protocol}://${req.get('host')}${req.baseUrl}/job/${jobId}`,
-        linkedin: jobDetails.link
+        linkedin: jobDetails.jobLink
       }
     };
 
@@ -737,12 +797,23 @@ app.use((req, res) => {
         method: 'GET',
         path: '/api/search/{keywords}/{location}',
         description: 'Search jobs by keywords and location',
-        example: '/api/search/software%20engineer/remote'
+        parameters: {
+          keywords: 'Job search terms (URL encoded)',
+          location: 'Job location (URL encoded)',
+          page: 'Page number (optional, default: 1)',
+          limit: 'Results per page (optional, default: 25)',
+          remote: 'Filter for remote jobs only (optional)'
+        },
+        example: '/api/search/software%20engineer/remote?page=1&limit=25'
       },
       {
         method: 'GET',
         path: '/api/job/{jobId}',
         description: 'Get detailed information about a specific job',
+        parameters: {
+          jobId: 'LinkedIn job posting ID',
+          enrichCompany: 'Get additional company details (optional)'
+        },
         example: '/api/job/3796675744'
       }
     ],
@@ -766,7 +837,7 @@ app.use((err, req, res, next) => {
 // ====================
 app.listen(PORT, () => {
   console.log(`
-    🚀 LinkedIn Jobs Scraper API v2.2.0
+    🚀 LinkedIn Jobs Scraper API v2.3.0
     
     Port: ${PORT}
     Environment: ${process.env.NODE_ENV || 'development'}
@@ -775,15 +846,20 @@ app.listen(PORT, () => {
     ✅ GET /api/search/{keywords}/{location}
     ✅ GET /api/job/{jobId}
     
+    Key Features:
+    • Clean text descriptions only (no HTML)
+    • Professional response formatting
+    • Salary extraction when available
+    • Enhanced text cleaning
+    
     Configuration:
     • Cache TTL: ${config.CACHE_TTL} seconds
     • Rate Limit: ${config.RATE_LIMIT_MAX} requests per 15 minutes
     • Max Results: ${config.MAX_RESULTS_PER_PAGE} per page
-    • Max Pages: ${config.MAX_PAGE}
     
     Examples:
     • http://localhost:${PORT}/api/search/software%20engineer/remote
-    • http://localhost:${PORT}/api/search/data%20scientist/San%20Francisco?page=2&limit=30
+    • http://localhost:${PORT}/api/search/data%20scientist/San%20Francisco?page=2
     • http://localhost:${PORT}/api/job/3796675744
   `);
 });
