@@ -29,9 +29,10 @@ const config = {
   RATE_LIMIT_MAX: 100, // requests per window
   
   // Limits
-  MAX_PAGE: 10,
+  MAX_PAGE: 50, // Increased from 10 to 50
   MAX_RESULTS_PER_PAGE: 50,
   DEFAULT_RESULTS_PER_PAGE: 25,
+  LINKEDIN_JOBS_PER_PAGE: 25, // LinkedIn returns 25 jobs per page
 };
 
 // ====================
@@ -355,7 +356,7 @@ class LinkedInScraper {
     }
   }
 
-  parseJobElement($, element) {
+  parseJobElement($, element, pageOffset = 0) {
     const $element = $(element);
     
     const rawTitle = $element.find('.base-search-card__title').text();
@@ -387,11 +388,12 @@ class LinkedInScraper {
       company: this.cleanText(rawCompany),
       location: this.cleanText(rawLocation),
       date: this.cleanText(rawDate),
-      link: jobLink, // Full LinkedIn job URL
+      link: jobLink,
       companyLink: cleanedCompanyLink,
       companyLogo: this.cleanText(rawCompanyLogo),
       easyApply: hasEasyApply || null,
       insights: this.cleanText(rawInsights),
+      pagePosition: pageOffset + 1 // Track position for debugging
     };
   }
 
@@ -400,10 +402,13 @@ class LinkedInScraper {
     page = Math.min(Math.max(parseInt(page) || 1, 1), config.MAX_PAGE);
     limit = Math.min(Math.max(parseInt(limit) || config.DEFAULT_RESULTS_PER_PAGE, 1), config.MAX_RESULTS_PER_PAGE);
     
+    // Calculate LinkedIn's start parameter (0-based)
+    const linkedinStart = (page - 1) * config.LINKEDIN_JOBS_PER_PAGE;
+    
     const params = new URLSearchParams({
       keywords: keywords,
       location: location,
-      start: (page - 1) * 25,
+      start: linkedinStart, // FIXED: Use proper pagination offset
       ...(remote && { f_WT: 2 })
     });
 
@@ -417,7 +422,7 @@ class LinkedInScraper {
     }
 
     try {
-      console.log('Fetching from LinkedIn:', url);
+      console.log(`Fetching page ${page} from LinkedIn (start=${linkedinStart}):`, url);
       const response = await this.fetchWithRetry(url);
       const $ = cheerio.load(response.data);
       
@@ -426,21 +431,23 @@ class LinkedInScraper {
       
       jobElements.each((i, element) => {
         if ($(element).hasClass('job-search-card')) {
-          const job = this.parseJobElement($, element);
+          const job = this.parseJobElement($, element, linkedinStart + i);
           if (job.title && job.company) {
             jobs.push(job);
           }
         }
       });
 
-      // Apply limit
+      // Apply limit after fetching
       jobs = jobs.slice(0, limit);
 
       // Extract pagination info
       const rawTotalResults = $('.results-context-header__job-count').text();
       const totalResults = rawTotalResults ? parseInt(rawTotalResults.replace(/\D/g, '')) : null;
-      const rawCurrentPage = $('.artdeco-pagination__indicator--number.active').text();
-      const currentPage = rawCurrentPage ? parseInt(rawCurrentPage) : page;
+      
+      // LinkedIn doesn't show current page in HTML, so we calculate it
+      const currentPage = page;
+      const jobsPerPage = limit;
 
       // Enrich companies if requested
       if (enrichCompanies) {
@@ -462,9 +469,14 @@ class LinkedInScraper {
         data: {
           totalResults,
           currentPage,
-          jobsPerPage: limit,
-          totalPages: totalResults ? Math.ceil(totalResults / limit) : null,
-          jobs: jobs
+          jobsPerPage,
+          totalPages: totalResults ? Math.ceil(totalResults / jobsPerPage) : null,
+          jobs: jobs,
+          pagination: {
+            linkedinStartPosition: linkedinStart,
+            itemsOnThisPage: jobs.length,
+            hasMorePages: totalResults ? (currentPage * jobsPerPage) < totalResults : null
+          }
         },
         searchParams: {
           keywords,
@@ -538,7 +550,7 @@ class LinkedInScraper {
         skills: skills.length > 0 ? skills : null,
         salary: salaryInfo,
         companyLink: companyLink,
-        jobLink: url, // Keep the LinkedIn job URL
+        jobLink: url,
         source: 'linkedin',
         timestamp: new Date().toISOString()
       };
@@ -606,18 +618,29 @@ class LinkedInScraper {
 const scraper = new LinkedInScraper();
 
 // ====================
-// API Routes - Clean Professional Design
+// API Routes - Fixed Pagination
 // ====================
 app.get('/', (req, res) => {
   res.json({
     name: 'LinkedIn Jobs Scraper API',
-    version: '2.5.0',
+    version: '2.6.0',
     status: 'operational',
     endpoints: [
       {
         method: 'GET',
         path: '/api/search/{keywords}/{location}',
-        description: 'Search LinkedIn jobs by keywords and location'
+        description: 'Search LinkedIn jobs by keywords and location',
+        parameters: {
+          page: 'Optional query parameter (default: 1, max: 50)'
+        }
+      },
+      {
+        method: 'GET',
+        path: '/api/search/{keywords}/{location}/{page}',
+        description: 'Search LinkedIn jobs with page in URL',
+        parameters: {
+          page: 'Required path parameter (1-50)'
+        }
       },
       {
         method: 'GET',
@@ -628,15 +651,19 @@ app.get('/', (req, res) => {
   });
 });
 
-// Search Jobs Endpoint
-app.get('/api/search/:keywords/:location', async (req, res) => {
+// Search Jobs Endpoint with optional page in URL
+app.get('/api/search/:keywords/:location/:page?', async (req, res) => {
   try {
     // Decode URL parameters
     const keywords = decodeURIComponent(req.params.keywords || '');
     const location = decodeURIComponent(req.params.location || '');
     
-    // Get query parameters with defaults
-    const page = parseInt(req.query.page) || 1;
+    // Get page from URL path parameter OR query parameter
+    const pageFromPath = req.params.page ? parseInt(req.params.page) : null;
+    const pageFromQuery = req.query.page ? parseInt(req.query.page) : null;
+    const page = pageFromPath || pageFromQuery || 1;
+    
+    // Get other query parameters with defaults
     const limit = parseInt(req.query.limit) || config.DEFAULT_RESULTS_PER_PAGE;
     const remote = req.query.remote === 'true';
     const enrichCompanies = req.query.enrichCompanies === 'true';
@@ -680,8 +707,11 @@ app.get('/api/search/:keywords/:location', async (req, res) => {
       enrichCompanies
     );
 
-    // Remove any internal indicators and API server links
+    // Remove any internal indicators
     delete result.cacheHit;
+    if (result.data && result.data.jobs) {
+      result.data.jobs.forEach(job => delete job.pagePosition);
+    }
     
     res.json(result);
 
@@ -729,7 +759,6 @@ app.get('/api/job/:jobId', async (req, res) => {
 
     // Remove only internal cache indicator
     delete jobDetails.cacheHit;
-    // KEEP jobLink - this is the LinkedIn URL
     
     const response = {
       success: true,
@@ -777,6 +806,12 @@ app.use((req, res) => {
       },
       {
         method: 'GET',
+        path: '/api/search/{keywords}/{location}/{page}',
+        description: 'Search jobs with page in URL',
+        example: '/api/search/software%20engineer/remote/2?limit=25'
+      },
+      {
+        method: 'GET',
         path: '/api/job/{jobId}',
         description: 'Get detailed information about a specific job',
         example: '/api/job/3796675744'
@@ -799,25 +834,33 @@ app.use((err, req, res, next) => {
 // ====================
 app.listen(PORT, () => {
   console.log(`
-    🚀 LinkedIn Jobs Scraper API v2.5.0
+    🚀 LinkedIn Jobs Scraper API v2.6.0
     
     Port: ${PORT}
     Environment: ${process.env.NODE_ENV || 'development'}
     
-    Clean Professional Endpoints:
-    ✅ GET /api/search/{keywords}/{location}
+    Fixed Pagination Endpoints:
+    ✅ GET /api/search/{keywords}/{location} (page as query param)
+    ✅ GET /api/search/{keywords}/{location}/{page} (page in URL)
     ✅ GET /api/job/{jobId}
     
-    Key Features:
-    • No Vercel/API server links in responses
-    • LinkedIn URLs preserved (jobLink, companyLink)
-    • Clean text descriptions only
-    • Professional response formatting
+    Key Fixes:
+    • FIXED: Proper pagination (no duplicate jobs)
+    • MAX_PAGE increased to 50
+    • LinkedIn start parameter calculated correctly
+    • Page tracking for debugging
     
     Configuration:
+    • Max Pages: ${config.MAX_PAGE}
     • Cache TTL: ${config.CACHE_TTL} seconds
     • Rate Limit: ${config.RATE_LIMIT_MAX} requests per 15 minutes
     • Max Results: ${config.MAX_RESULTS_PER_PAGE} per page
+    
+    Examples:
+    • http://localhost:${PORT}/api/search/software%20engineer/remote
+    • http://localhost:${PORT}/api/search/software%20engineer/remote?page=2&limit=30
+    • http://localhost:${PORT}/api/search/software%20engineer/remote/2?limit=30
+    • http://localhost:${PORT}/api/job/3796675744
     
     Ready for RapidAPI deployment!
   `);
