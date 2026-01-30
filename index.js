@@ -28,11 +28,9 @@ const config = {
   RATE_LIMIT_WINDOW: 15 * 60 * 1000, // 15 minutes
   RATE_LIMIT_MAX: 100, // requests per window
   
-  // Limits
-  MAX_PAGE: 50, // Increased from 10 to 50
-  MAX_RESULTS_PER_PAGE: 50,
-  DEFAULT_RESULTS_PER_PAGE: 25,
-  LINKEDIN_JOBS_PER_PAGE: 25, // LinkedIn returns 25 jobs per page
+  // Results - CHANGED TO 50
+  DEFAULT_RESULTS: 50, // Always return 50 most relevant jobs
+  MAX_RESULTS: 50, // Max is also 50 (simplified)
 };
 
 // ====================
@@ -356,7 +354,7 @@ class LinkedInScraper {
     }
   }
 
-  parseJobElement($, element, pageOffset = 0) {
+  parseJobElement($, element) {
     const $element = $(element);
     
     const rawTitle = $element.find('.base-search-card__title').text();
@@ -393,27 +391,20 @@ class LinkedInScraper {
       companyLogo: this.cleanText(rawCompanyLogo),
       easyApply: hasEasyApply || null,
       insights: this.cleanText(rawInsights),
-      pagePosition: pageOffset + 1 // Track position for debugging
     };
   }
 
-  async searchJobs(keywords, location = '', page = 1, limit = config.DEFAULT_RESULTS_PER_PAGE, remote = false, enrichCompanies = false) {
-    // Validate inputs
-    page = Math.min(Math.max(parseInt(page) || 1, 1), config.MAX_PAGE);
-    limit = Math.min(Math.max(parseInt(limit) || config.DEFAULT_RESULTS_PER_PAGE, 1), config.MAX_RESULTS_PER_PAGE);
-    
-    // Calculate LinkedIn's start parameter (0-based)
-    const linkedinStart = (page - 1) * config.LINKEDIN_JOBS_PER_PAGE;
-    
+  async searchJobs(keywords, location = '', remote = false, enrichCompanies = false) {
+    // Always get 50 most relevant jobs (no pagination)
     const params = new URLSearchParams({
       keywords: keywords,
       location: location,
-      start: linkedinStart, // FIXED: Use proper pagination offset
+      start: 0, // Always get first 50 most relevant jobs
       ...(remote && { f_WT: 2 })
     });
 
     const url = `${config.JOBS_SEARCH_URL}?${params.toString()}`;
-    const cacheKey = `jobs:${keywords}:${location}:${page}:${limit}:${remote}:${enrichCompanies}`;
+    const cacheKey = `jobs:${keywords}:${location}:${remote}:${enrichCompanies}`;
 
     const cached = cache.get(cacheKey);
     if (cached) {
@@ -422,7 +413,7 @@ class LinkedInScraper {
     }
 
     try {
-      console.log(`Fetching page ${page} from LinkedIn (start=${linkedinStart}):`, url);
+      console.log('Fetching 50 most relevant jobs from LinkedIn:', url);
       const response = await this.fetchWithRetry(url);
       const $ = cheerio.load(response.data);
       
@@ -431,23 +422,19 @@ class LinkedInScraper {
       
       jobElements.each((i, element) => {
         if ($(element).hasClass('job-search-card')) {
-          const job = this.parseJobElement($, element, linkedinStart + i);
+          const job = this.parseJobElement($, element);
           if (job.title && job.company) {
             jobs.push(job);
           }
         }
       });
 
-      // Apply limit after fetching
-      jobs = jobs.slice(0, limit);
+      // Get exactly 50 jobs (or as many as available)
+      jobs = jobs.slice(0, config.DEFAULT_RESULTS);
 
-      // Extract pagination info
+      // Extract total results for information
       const rawTotalResults = $('.results-context-header__job-count').text();
       const totalResults = rawTotalResults ? parseInt(rawTotalResults.replace(/\D/g, '')) : null;
-      
-      // LinkedIn doesn't show current page in HTML, so we calculate it
-      const currentPage = page;
-      const jobsPerPage = limit;
 
       // Enrich companies if requested
       if (enrichCompanies) {
@@ -467,22 +454,14 @@ class LinkedInScraper {
       const result = {
         success: true,
         data: {
-          totalResults,
-          currentPage,
-          jobsPerPage,
-          totalPages: totalResults ? Math.ceil(totalResults / jobsPerPage) : null,
+          totalAvailableJobs: totalResults,
+          jobsReturned: jobs.length,
           jobs: jobs,
-          pagination: {
-            linkedinStartPosition: linkedinStart,
-            itemsOnThisPage: jobs.length,
-            hasMorePages: totalResults ? (currentPage * jobsPerPage) < totalResults : null
-          }
+          note: "Returns 50 most relevant jobs. For more specific results, refine your search keywords."
         },
         searchParams: {
           keywords,
           location,
-          page,
-          limit,
           remote
         },
         timestamp: new Date().toISOString()
@@ -618,53 +597,45 @@ class LinkedInScraper {
 const scraper = new LinkedInScraper();
 
 // ====================
-// API Routes - Fixed Pagination
+// API Routes - Simplified (No Pagination)
 // ====================
 app.get('/', (req, res) => {
   res.json({
     name: 'LinkedIn Jobs Scraper API',
-    version: '2.6.0',
+    version: '3.0.0',
     status: 'operational',
+    description: 'Get 50 most relevant LinkedIn jobs instantly',
     endpoints: [
       {
         method: 'GET',
         path: '/api/search/{keywords}/{location}',
-        description: 'Search LinkedIn jobs by keywords and location',
-        parameters: {
-          page: 'Optional query parameter (default: 1, max: 50)'
-        }
-      },
-      {
-        method: 'GET',
-        path: '/api/search/{keywords}/{location}/{page}',
-        description: 'Search LinkedIn jobs with page in URL',
-        parameters: {
-          page: 'Required path parameter (1-50)'
-        }
+        description: 'Get 50 most relevant LinkedIn jobs',
+        example: '/api/search/software%20engineer/remote'
       },
       {
         method: 'GET',
         path: '/api/job/{jobId}',
-        description: 'Get detailed information about a LinkedIn job'
+        description: 'Get detailed information about a LinkedIn job',
+        example: '/api/job/3796675744'
       }
+    ],
+    features: [
+      '50 most relevant jobs per search',
+      'Clean text descriptions',
+      'LinkedIn job URLs included',
+      'Rate limited & cached'
     ]
   });
 });
 
-// Search Jobs Endpoint with optional page in URL
-app.get('/api/search/:keywords/:location/:page?', async (req, res) => {
+// Search Jobs Endpoint - SIMPLIFIED (No pagination)
+app.get('/api/search/:keywords/:location', async (req, res) => {
   try {
     // Decode URL parameters
     const keywords = decodeURIComponent(req.params.keywords || '');
     const location = decodeURIComponent(req.params.location || '');
     
-    // Get page from URL path parameter OR query parameter
-    const pageFromPath = req.params.page ? parseInt(req.params.page) : null;
-    const pageFromQuery = req.query.page ? parseInt(req.query.page) : null;
-    const page = pageFromPath || pageFromQuery || 1;
-    
-    // Get other query parameters with defaults
-    const limit = parseInt(req.query.limit) || config.DEFAULT_RESULTS_PER_PAGE;
+    // Get query parameters
     const remote = req.query.remote === 'true';
     const enrichCompanies = req.query.enrichCompanies === 'true';
 
@@ -683,35 +654,15 @@ app.get('/api/search/:keywords/:location/:page?', async (req, res) => {
       });
     }
 
-    // Validate limits
-    if (page < 1 || page > config.MAX_PAGE) {
-      return res.status(400).json({
-        success: false,
-        error: `Page must be between 1 and ${config.MAX_PAGE}`
-      });
-    }
-
-    if (limit < 1 || limit > config.MAX_RESULTS_PER_PAGE) {
-      return res.status(400).json({
-        success: false,
-        error: `Limit must be between 1 and ${config.MAX_RESULTS_PER_PAGE}`
-      });
-    }
-
     const result = await scraper.searchJobs(
       keywords,
       location,
-      page,
-      limit,
       remote,
       enrichCompanies
     );
 
-    // Remove any internal indicators
+    // Remove internal indicators
     delete result.cacheHit;
-    if (result.data && result.data.jobs) {
-      result.data.jobs.forEach(job => delete job.pagePosition);
-    }
     
     res.json(result);
 
@@ -801,14 +752,8 @@ app.use((req, res) => {
       {
         method: 'GET',
         path: '/api/search/{keywords}/{location}',
-        description: 'Search jobs by keywords and location',
-        example: '/api/search/software%20engineer/remote?page=1&limit=25'
-      },
-      {
-        method: 'GET',
-        path: '/api/search/{keywords}/{location}/{page}',
-        description: 'Search jobs with page in URL',
-        example: '/api/search/software%20engineer/remote/2?limit=25'
+        description: 'Get 50 most relevant LinkedIn jobs',
+        example: '/api/search/software%20engineer/remote'
       },
       {
         method: 'GET',
@@ -834,35 +779,32 @@ app.use((err, req, res, next) => {
 // ====================
 app.listen(PORT, () => {
   console.log(`
-    🚀 LinkedIn Jobs Scraper API v2.6.0
+    🚀 LinkedIn Jobs Scraper API v3.0.0
     
     Port: ${PORT}
     Environment: ${process.env.NODE_ENV || 'development'}
     
-    Fixed Pagination Endpoints:
-    ✅ GET /api/search/{keywords}/{location} (page as query param)
-    ✅ GET /api/search/{keywords}/{location}/{page} (page in URL)
+    Simplified Endpoints:
+    ✅ GET /api/search/{keywords}/{location}  (50 most relevant jobs)
     ✅ GET /api/job/{jobId}
     
-    Key Fixes:
-    • FIXED: Proper pagination (no duplicate jobs)
-    • MAX_PAGE increased to 50
-    • LinkedIn start parameter calculated correctly
-    • Page tracking for debugging
+    Key Features:
+    • 50 jobs per search (doubled from 25)
+    • No pagination complexity
+    • Clean, simple API
+    • LinkedIn URLs preserved
     
     Configuration:
-    • Max Pages: ${config.MAX_PAGE}
+    • Jobs per search: ${config.DEFAULT_RESULTS}
     • Cache TTL: ${config.CACHE_TTL} seconds
     • Rate Limit: ${config.RATE_LIMIT_MAX} requests per 15 minutes
-    • Max Results: ${config.MAX_RESULTS_PER_PAGE} per page
     
     Examples:
     • http://localhost:${PORT}/api/search/software%20engineer/remote
-    • http://localhost:${PORT}/api/search/software%20engineer/remote?page=2&limit=30
-    • http://localhost:${PORT}/api/search/software%20engineer/remote/2?limit=30
+    • http://localhost:${PORT}/api/search/data%20scientist/New%20York
     • http://localhost:${PORT}/api/job/3796675744
     
-    Ready for RapidAPI deployment!
+    Perfect for RapidAPI! 50 jobs = more value for subscribers! 🚀
   `);
 });
 
