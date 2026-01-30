@@ -1,7 +1,6 @@
 const express = require('express');
 const cors = require('cors');
 const helmet = require('helmet');
-const rateLimit = require('express-rate-limit');
 const axios = require('axios');
 const cheerio = require('cheerio');
 const NodeCache = require('node-cache');
@@ -24,13 +23,8 @@ const config = {
   MAX_RETRIES: 3,
   REQUEST_TIMEOUT: 30000, // 30 seconds
   
-  // Rate limiting
-  RATE_LIMIT_WINDOW: 15 * 60 * 1000, // 15 minutes
-  RATE_LIMIT_MAX: 100, // requests per window
-  
-  // Results - CHANGED TO 50
-  DEFAULT_RESULTS: 50, // Always return 50 most relevant jobs
-  MAX_RESULTS: 50, // Max is also 50 (simplified)
+  // Results
+  DEFAULT_RESULTS: 50, // Return 50 most relevant jobs
 };
 
 // ====================
@@ -56,40 +50,6 @@ app.use(cors({
 
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
-
-// Rate limiting per API key
-const apiKeyRateLimit = new Map();
-const rateLimiter = (req, res, next) => {
-  const apiKey = req.headers['x-rapidapi-proxy-secret'] || req.headers['x-api-key'] || req.ip;
-  
-  if (!apiKeyRateLimit.has(apiKey)) {
-    apiKeyRateLimit.set(apiKey, {
-      count: 0,
-      resetTime: Date.now() + config.RATE_LIMIT_WINDOW
-    });
-  }
-  
-  const limitInfo = apiKeyRateLimit.get(apiKey);
-  
-  if (Date.now() > limitInfo.resetTime) {
-    limitInfo.count = 0;
-    limitInfo.resetTime = Date.now() + config.RATE_LIMIT_WINDOW;
-  }
-  
-  if (limitInfo.count >= config.RATE_LIMIT_MAX) {
-    return res.status(429).json({
-      success: false,
-      error: 'Too many requests',
-      retryAfter: Math.ceil((limitInfo.resetTime - Date.now()) / 1000),
-      timestamp: new Date().toISOString()
-    });
-  }
-  
-  limitInfo.count++;
-  next();
-};
-
-app.use(rateLimiter);
 
 // Cache setup
 const cache = new NodeCache({ stdTTL: config.CACHE_TTL });
@@ -456,8 +416,7 @@ class LinkedInScraper {
         data: {
           totalAvailableJobs: totalResults,
           jobsReturned: jobs.length,
-          jobs: jobs,
-          note: "Returns 50 most relevant jobs. For more specific results, refine your search keywords."
+          jobs: jobs
         },
         searchParams: {
           keywords,
@@ -597,38 +556,31 @@ class LinkedInScraper {
 const scraper = new LinkedInScraper();
 
 // ====================
-// API Routes - Simplified (No Pagination)
+// API Routes
 // ====================
 app.get('/', (req, res) => {
   res.json({
     name: 'LinkedIn Jobs Scraper API',
-    version: '3.0.0',
+    version: '3.1.0',
     status: 'operational',
-    description: 'Get 50 most relevant LinkedIn jobs instantly',
+    description: 'Get LinkedIn jobs instantly with clean data',
     endpoints: [
       {
         method: 'GET',
         path: '/api/search/{keywords}/{location}',
-        description: 'Get 50 most relevant LinkedIn jobs',
-        example: '/api/search/software%20engineer/remote'
+        description: 'Search LinkedIn jobs by keywords and location'
       },
       {
         method: 'GET',
         path: '/api/job/{jobId}',
-        description: 'Get detailed information about a LinkedIn job',
-        example: '/api/job/3796675744'
+        description: 'Get detailed information about a LinkedIn job'
       }
     ],
-    features: [
-      '50 most relevant jobs per search',
-      'Clean text descriptions',
-      'LinkedIn job URLs included',
-      'Rate limited & cached'
-    ]
+    note: 'Rate limiting managed by RapidAPI per subscription tier'
   });
 });
 
-// Search Jobs Endpoint - SIMPLIFIED (No pagination)
+// Search Jobs Endpoint
 app.get('/api/search/:keywords/:location', async (req, res) => {
   try {
     // Decode URL parameters
@@ -752,7 +704,7 @@ app.use((req, res) => {
       {
         method: 'GET',
         path: '/api/search/{keywords}/{location}',
-        description: 'Get 50 most relevant LinkedIn jobs',
+        description: 'Get LinkedIn jobs by keywords and location',
         example: '/api/search/software%20engineer/remote'
       },
       {
@@ -779,32 +731,32 @@ app.use((err, req, res, next) => {
 // ====================
 app.listen(PORT, () => {
   console.log(`
-    🚀 LinkedIn Jobs Scraper API v3.0.0
+    🚀 LinkedIn Jobs Scraper API v3.1.0
     
     Port: ${PORT}
     Environment: ${process.env.NODE_ENV || 'development'}
     
-    Simplified Endpoints:
-    ✅ GET /api/search/{keywords}/{location}  (50 most relevant jobs)
+    Simplified API:
+    ✅ GET /api/search/{keywords}/{location}
     ✅ GET /api/job/{jobId}
     
     Key Features:
-    • 50 jobs per search (doubled from 25)
+    • 50 most relevant jobs per search
     • No pagination complexity
-    • Clean, simple API
-    • LinkedIn URLs preserved
+    • Clean text descriptions
+    • Rate limiting managed by RapidAPI
     
     Configuration:
     • Jobs per search: ${config.DEFAULT_RESULTS}
     • Cache TTL: ${config.CACHE_TTL} seconds
-    • Rate Limit: ${config.RATE_LIMIT_MAX} requests per 15 minutes
+    • Retry attempts: ${config.MAX_RETRIES}
     
     Examples:
     • http://localhost:${PORT}/api/search/software%20engineer/remote
     • http://localhost:${PORT}/api/search/data%20scientist/New%20York
     • http://localhost:${PORT}/api/job/3796675744
     
-    Perfect for RapidAPI! 50 jobs = more value for subscribers! 🚀
+    Ready for production! 🚀
   `);
 });
 
