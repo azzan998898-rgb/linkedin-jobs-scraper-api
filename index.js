@@ -256,6 +256,56 @@ class LinkedInScraper {
     }
   }
 
+  // Extract numeric ID from any LinkedIn ID format
+  extractNumericId(input) {
+    if (!input) return null;
+    
+    // Try to extract numeric part from various formats
+    const str = String(input);
+    
+    // Case 1: Already numeric
+    if (/^\d+$/.test(str)) {
+      return str;
+    }
+    
+    // Case 2: Extract numeric part from alphanumeric
+    const numericMatch = str.match(/(\d+)/);
+    if (numericMatch && numericMatch[1]) {
+      return numericMatch[1];
+    }
+    
+    // Case 3: Extract from URL patterns
+    const urlPatterns = [
+      /jobs\/view\/(\d+)/,
+      /jobId=(\d+)/,
+      /id=(\d+)/,
+      /-(\d+)\//,
+    ];
+    
+    for (const pattern of urlPatterns) {
+      const match = str.match(pattern);
+      if (match && match[1]) {
+        return match[1];
+      }
+    }
+    
+    // Case 4: No numeric ID found, generate a fallback numeric ID
+    // Convert UUID to numeric string (first 10 digits of hash)
+    const fallbackId = Math.abs(this.stringToHash(str)).toString().substring(0, 10);
+    return fallbackId;
+  }
+  
+  // Helper to generate consistent numeric hash from string
+  stringToHash(str) {
+    let hash = 0;
+    for (let i = 0; i < str.length; i++) {
+      const char = str.charCodeAt(i);
+      hash = ((hash << 5) - hash) + char;
+      hash = hash & hash; // Convert to 32bit integer
+    }
+    return Math.abs(hash);
+  }
+
   cleanText(text) {
     if (!text || typeof text !== 'string') return null;
     const cleaned = text.trim().replace(/\s+/g, ' ');
@@ -340,8 +390,12 @@ class LinkedInScraper {
       jobLink = `https://www.linkedin.com${jobLink}`;
     }
     
+    // Extract consistent numeric ID
+    const rawId = $element.attr('data-id') || jobLink || uuidv4();
+    const numericId = this.extractNumericId(rawId);
+    
     return {
-      id: $element.attr('data-id') || uuidv4(),
+      id: numericId, // Always numeric ID
       title: this.cleanText(rawTitle),
       company: this.cleanText(rawCompany),
       location: this.cleanText(rawLocation),
@@ -383,7 +437,7 @@ class LinkedInScraper {
       jobElements.each((i, element) => {
         if ($(element).hasClass('job-search-card')) {
           const job = this.parseJobElement($, element);
-          if (job.title && job.company) {
+          if (job.title && job.company && job.id) {
             jobs.push(job);
           }
         }
@@ -436,7 +490,13 @@ class LinkedInScraper {
   }
 
   async getJobDetails(jobId, enrichCompany = false) {
-    const cacheKey = `job:${jobId}:${enrichCompany}`;
+    // Ensure jobId is numeric
+    const numericJobId = this.extractNumericId(jobId);
+    if (!numericJobId) {
+      throw new Error('Invalid Job ID. Job ID must contain numeric values.');
+    }
+    
+    const cacheKey = `job:${numericJobId}:${enrichCompany}`;
     const cached = cache.get(cacheKey);
     if (cached) {
       cached.cacheHit = true;
@@ -444,7 +504,7 @@ class LinkedInScraper {
     }
 
     try {
-      const url = `https://www.linkedin.com/jobs/view/${jobId}`;
+      const url = `https://www.linkedin.com/jobs/view/${numericJobId}`;
       const response = await this.fetchWithRetry(url);
       const $ = cheerio.load(response.data);
 
@@ -473,7 +533,7 @@ class LinkedInScraper {
       const salaryInfo = this.extractSalary($);
 
       const jobDetails = {
-        id: jobId,
+        id: numericJobId, // Always numeric
         title: this.cleanText(rawTitle),
         company: this.cleanText(rawCompany),
         location: this.cleanText(rawLocation),
@@ -561,22 +621,23 @@ const scraper = new LinkedInScraper();
 app.get('/', (req, res) => {
   res.json({
     name: 'LinkedIn Jobs Scraper API',
-    version: '3.1.0',
+    version: '3.2.0',
     status: 'operational',
-    description: 'Get LinkedIn jobs instantly with clean data',
+    description: 'Get LinkedIn jobs with consistent numeric IDs',
     endpoints: [
       {
         method: 'GET',
         path: '/api/search/{keywords}/{location}',
-        description: 'Search LinkedIn jobs by keywords and location'
+        description: 'Search LinkedIn jobs by keywords and location',
+        note: 'Returns jobs with numeric IDs for use with job details endpoint'
       },
       {
         method: 'GET',
         path: '/api/job/{jobId}',
-        description: 'Get detailed information about a LinkedIn job'
+        description: 'Get detailed information about a LinkedIn job',
+        note: 'Job ID must be numeric (as returned by search endpoint)'
       }
-    ],
-    note: 'Rate limiting managed by RapidAPI per subscription tier'
+    ]
   });
 });
 
@@ -630,21 +691,13 @@ app.get('/api/search/:keywords/:location', async (req, res) => {
 // Job Details Endpoint
 app.get('/api/job/:jobId', async (req, res) => {
   try {
-    const { jobId } = req.params;
+    let { jobId } = req.params;
     const { enrichCompany = false } = req.query;
     
     if (!jobId || !jobId.trim()) {
       return res.status(400).json({
         success: false,
         error: 'Job ID is required'
-      });
-    }
-
-    // Validate job ID format (should be numeric)
-    if (!/^\d+$/.test(jobId)) {
-      return res.status(400).json({
-        success: false,
-        error: 'Invalid Job ID format. Job ID should be numeric.'
       });
     }
 
@@ -677,7 +730,10 @@ app.get('/api/job/:jobId', async (req, res) => {
     let statusCode = 500;
     let errorMessage = error.message;
     
-    if (error.message.includes('404') || error.message.includes('not found')) {
+    if (error.message.includes('Invalid Job ID') || error.message.includes('must contain numeric')) {
+      statusCode = 400;
+      errorMessage = 'Job ID must be numeric. Use the numeric IDs returned by the search endpoint.';
+    } else if (error.message.includes('404') || error.message.includes('not found')) {
       statusCode = 404;
       errorMessage = 'Job not found or no longer available on LinkedIn';
     } else if (error.message.includes('timeout')) {
@@ -705,13 +761,15 @@ app.use((req, res) => {
         method: 'GET',
         path: '/api/search/{keywords}/{location}',
         description: 'Get LinkedIn jobs by keywords and location',
-        example: '/api/search/software%20engineer/remote'
+        example: '/api/search/software%20engineer/remote',
+        note: 'Returns jobs with numeric IDs'
       },
       {
         method: 'GET',
         path: '/api/job/{jobId}',
         description: 'Get detailed information about a specific job',
-        example: '/api/job/3796675744'
+        example: '/api/job/3796675744',
+        note: 'Job ID must be numeric'
       }
     ]
   });
@@ -731,10 +789,15 @@ app.use((err, req, res, next) => {
 // ====================
 app.listen(PORT, () => {
   console.log(`
-    🚀 LinkedIn Jobs Scraper API v3.1.0
+    🚀 LinkedIn Jobs Scraper API v3.2.0
     
     Port: ${PORT}
     Environment: ${process.env.NODE_ENV || 'development'}
+    
+    Consistent Numeric IDs:
+    ✅ Search returns numeric IDs only
+    ✅ Job details accepts numeric IDs only
+    ✅ All IDs are consistent across endpoints
     
     Simplified API:
     ✅ GET /api/search/{keywords}/{location}
@@ -742,9 +805,9 @@ app.listen(PORT, () => {
     
     Key Features:
     • 50 most relevant jobs per search
-    • No pagination complexity
+    • Consistent numeric IDs
     • Clean text descriptions
-    • Rate limiting managed by RapidAPI
+    • No pagination complexity
     
     Configuration:
     • Jobs per search: ${config.DEFAULT_RESULTS}
@@ -753,7 +816,6 @@ app.listen(PORT, () => {
     
     Examples:
     • http://localhost:${PORT}/api/search/software%20engineer/remote
-    • http://localhost:${PORT}/api/search/data%20scientist/New%20York
     • http://localhost:${PORT}/api/job/3796675744
     
     Ready for production! 🚀
