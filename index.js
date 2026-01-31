@@ -256,30 +256,33 @@ class LinkedInScraper {
     }
   }
 
-  // Extract numeric ID from any LinkedIn ID format
-  extractNumericId(input) {
+  // FIXED: Extract numeric ID - prioritize LinkedIn URL ID first
+  extractNumericId(input, jobLink = null) {
     if (!input) return null;
     
-    // Try to extract numeric part from various formats
     const str = String(input);
     
-    // Case 1: Already numeric
-    if (/^\d+$/.test(str)) {
-      return str;
+    // PRIORITY 1: Extract from LinkedIn job URL (most reliable)
+    if (jobLink) {
+      // Pattern: /jobs/view/.*-(\d+)
+      const urlMatch = jobLink.match(/jobs\/view\/[^\/]*-(\d+)/);
+      if (urlMatch && urlMatch[1]) {
+        return urlMatch[1]; // Returns the 10-digit LinkedIn job ID
+      }
+      
+      // Alternative pattern: /jobs/view/(\d+)
+      const directUrlMatch = jobLink.match(/jobs\/view\/(\d+)/);
+      if (directUrlMatch && directUrlMatch[1]) {
+        return directUrlMatch[1];
+      }
     }
     
-    // Case 2: Extract numeric part from alphanumeric
-    const numericMatch = str.match(/(\d+)/);
-    if (numericMatch && numericMatch[1]) {
-      return numericMatch[1];
-    }
-    
-    // Case 3: Extract from URL patterns
+    // PRIORITY 2: Extract from the input string if it contains a LinkedIn URL
     const urlPatterns = [
+      /jobs\/view\/[^\/]*-(\d+)/,
       /jobs\/view\/(\d+)/,
       /jobId=(\d+)/,
-      /id=(\d+)/,
-      /-(\d+)\//,
+      /\/(\d+)(?:\?|$)/, // Digits at end of URL before query params
     ];
     
     for (const pattern of urlPatterns) {
@@ -289,8 +292,24 @@ class LinkedInScraper {
       }
     }
     
-    // Case 4: No numeric ID found, generate a fallback numeric ID
-    // Convert UUID to numeric string (first 10 digits of hash)
+    // PRIORITY 3: Already a pure numeric ID
+    if (/^\d{5,}$/.test(str)) {
+      return str; // Only return if it's a decent length number (5+ digits)
+    }
+    
+    // PRIORITY 4: Extract the LAST numeric sequence from alphanumeric
+    // This avoids picking up "1" from "Software Engineer 1"
+    const allNumbers = str.match(/\d+/g);
+    if (allNumbers && allNumbers.length > 0) {
+      // Take the last (usually largest) number, not the first
+      const lastNumber = allNumbers[allNumbers.length - 1];
+      if (lastNumber.length >= 5) {
+        return lastNumber; // Only if it looks like a real ID (5+ digits)
+      }
+    }
+    
+    // PRIORITY 5: Generate a consistent fallback numeric ID from hash
+    // Convert UUID or string to numeric hash (first 10 digits)
     const fallbackId = Math.abs(this.stringToHash(str)).toString().substring(0, 10);
     return fallbackId;
   }
@@ -390,9 +409,9 @@ class LinkedInScraper {
       jobLink = `https://www.linkedin.com${jobLink}`;
     }
     
-    // Extract consistent numeric ID
+    // Extract consistent numeric ID - PASS THE JOB LINK TO PRIORITIZE IT
     const rawId = $element.attr('data-id') || jobLink || uuidv4();
-    const numericId = this.extractNumericId(rawId);
+    const numericId = this.extractNumericId(rawId, jobLink); // Pass jobLink as second parameter
     
     return {
       id: numericId, // Always numeric ID
@@ -621,7 +640,7 @@ const scraper = new LinkedInScraper();
 app.get('/', (req, res) => {
   res.json({
     name: 'LinkedIn Jobs Scraper API',
-    version: '3.2.0',
+    version: '3.3.0',
     status: 'operational',
     description: 'Get LinkedIn jobs with consistent numeric IDs',
     endpoints: [
@@ -789,15 +808,15 @@ app.use((err, req, res, next) => {
 // ====================
 app.listen(PORT, () => {
   console.log(`
-    🚀 LinkedIn Jobs Scraper API v3.2.0
+    🚀 LinkedIn Jobs Scraper API v3.3.0
     
     Port: ${PORT}
     Environment: ${process.env.NODE_ENV || 'development'}
     
-    Consistent Numeric IDs:
-    ✅ Search returns numeric IDs only
-    ✅ Job details accepts numeric IDs only
-    ✅ All IDs are consistent across endpoints
+    Fixed ID Extraction:
+    ✅ LinkedIn URL IDs prioritized (10-digit job IDs)
+    ✅ No more "Software Engineer 1" → "1" bug
+    ✅ Consistent numeric IDs throughout
     
     Simplified API:
     ✅ GET /api/search/{keywords}/{location}
@@ -805,7 +824,7 @@ app.listen(PORT, () => {
     
     Key Features:
     • 50 most relevant jobs per search
-    • Consistent numeric IDs
+    • Consistent 10-digit numeric IDs
     • Clean text descriptions
     • No pagination complexity
     
