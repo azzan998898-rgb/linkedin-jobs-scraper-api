@@ -495,8 +495,8 @@ class LinkedInScraper {
           keywords,
           location,
           remote
-        },
-        timestamp: new Date().toISOString()
+        }
+        // TIMESTAMP REMOVED
       };
 
       cache.set(cacheKey, result);
@@ -568,8 +568,8 @@ class LinkedInScraper {
         salary: salaryInfo,
         companyLink: companyLink,
         jobLink: url,
-        source: 'linkedin',
-        timestamp: new Date().toISOString()
+        source: 'linkedin'
+        // TIMESTAMP REMOVED
       };
 
       // Enrich company info if requested
@@ -640,7 +640,7 @@ const scraper = new LinkedInScraper();
 app.get('/', (req, res) => {
   res.json({
     name: 'LinkedIn Jobs Scraper API',
-    version: '3.3.0',
+    version: '3.4.0',
     status: 'operational',
     description: 'Get LinkedIn jobs with consistent numeric IDs',
     endpoints: [
@@ -808,25 +808,24 @@ app.use((err, req, res, next) => {
 // ====================
 app.listen(PORT, () => {
   console.log(`
-    🚀 LinkedIn Jobs Scraper API v3.3.0
+    🚀 LinkedIn Jobs Scraper API v3.4.0
     
     Port: ${PORT}
     Environment: ${process.env.NODE_ENV || 'development'}
     
-    Fixed ID Extraction:
-    ✅ LinkedIn URL IDs prioritized (10-digit job IDs)
-    ✅ No more "Software Engineer 1" → "1" bug
-    ✅ Consistent numeric IDs throughout
+    Clean & Professional:
+    ✅ No timestamps in responses
+    ✅ Consistent 10-digit numeric IDs
+    ✅ Up to 50 most relevant jobs per search
     
     Simplified API:
     ✅ GET /api/search/{keywords}/{location}
     ✅ GET /api/job/{jobId}
     
     Key Features:
-    • 50 most relevant jobs per search
-    • Consistent 10-digit numeric IDs
-    • Clean text descriptions
-    • No pagination complexity
+    • Clean, focused JSON responses
+    • Numeric IDs that work across endpoints
+    • Professional LinkedIn job data
     
     Configuration:
     • Jobs per search: ${config.DEFAULT_RESULTS}
@@ -837,7 +836,7 @@ app.listen(PORT, () => {
     • http://localhost:${PORT}/api/search/software%20engineer/remote
     • http://localhost:${PORT}/api/job/3796675744
     
-    Ready for production! 🚀
+    Production Ready! 🚀
   `);
 });
 
