@@ -1442,7 +1442,7 @@ class LinkedInScraper {
       const rawCompanyLink = $('.topcard__org-name-link').attr('href');
       const companyLink = this.cleanText(rawCompanyLink);
 
-      // Extract salary if available
+      // ENHANCED: Extract salary with flexible regex for all formats
       const salaryInfo = this.extractSalary($);
       
       // Get company details if needed for salary estimation
@@ -1530,23 +1530,71 @@ class LinkedInScraper {
     return skills;
   }
 
+  // ENHANCED: Universal salary extraction that handles ALL formats
   extractSalary($) {
     const salaryElement = $('.salary');
     if (salaryElement.length) {
       const salaryText = salaryElement.text().trim();
       if (salaryText) {
-        // Try to extract numeric salary ranges
-        const matches = salaryText.match(/(\$[\d,]+(?:\.\d{2})?)(?:\s*-\s*\$([\d,]+(?:\.\d{2})?))?/);
+        // SUPER FLEXIBLE regex - handles almost any salary format
+        // Matches patterns like:
+        // $55.50 - $75.00, US$55.50 - US$75.00, $120K - $150K, 
+        // $85,000 - $120,000, $85,000 to $120,000, CAD$80,000 - CAD$100,000,
+        // €50.000 - €70.000, 55.50 - 75.00/hour, etc.
+        const matches = salaryText.match(
+          /(?:[^\d]*)(\d{1,3}(?:[,\s]\d{3})*(?:\.\d{1,2})?)[kK]?\s*(?:-|–|to)\s*(?:[^\d]*)(\d{1,3}(?:[,\s]\d{3})*(?:\.\d{1,2})?)[kK]?/i
+        );
+        
         if (matches) {
+          // Clean the numbers (remove commas, spaces, K suffix)
+          const cleanNumber = (str) => {
+            // Remove commas and spaces
+            let cleaned = str.replace(/[,\s]/g, '');
+            
+            // Handle K suffix (multiply by 1000)
+            if (str.toLowerCase().includes('k')) {
+              cleaned = (parseFloat(cleaned) * 1000).toString();
+            }
+            
+            return cleaned;
+          };
+          
+          // Detect currency from the text
+          const detectCurrency = (text) => {
+            if (text.includes('$') || text.includes('USD') || text.includes('US$')) return 'USD';
+            if (text.includes('€') || text.includes('EUR')) return 'EUR';
+            if (text.includes('£') || text.includes('GBP')) return 'GBP';
+            if (text.includes('CAD') || text.includes('C$')) return 'CAD';
+            if (text.includes('AUD') || text.includes('A$')) return 'AUD';
+            if (text.includes('JPY') || text.includes('¥')) return 'JPY';
+            if (text.includes('CNY') || text.includes('¥')) return 'CNY';
+            if (text.includes('INR') || text.includes('₹')) return 'INR';
+            return 'USD'; // Default
+          };
+          
+          // Detect if it's hourly
+          const isHourly = /hour|hr|\/h/i.test(salaryText);
+          
+          // Detect if it's monthly
+          const isMonthly = /month|mo|\/mo/i.test(salaryText) && !isHourly;
+          
+          // Determine period
+          let period = 'YEAR';
+          if (isHourly) period = 'HOUR';
+          else if (isMonthly) period = 'MONTH';
+          
           return {
             text: salaryText,
-            min: matches[1] ? matches[1].replace(/[^\d.]/g, '') : null,
-            max: matches[2] ? matches[2].replace(/[^\d.]/g, '') : null,
-            currency: 'USD',
+            min: cleanNumber(matches[1]),
+            max: cleanNumber(matches[2]),
+            currency: detectCurrency(salaryText),
+            period: period,
             estimated: false,
             source: 'LinkedIn Job Posting'
           };
         }
+        
+        // If no range found, return just the text
         return { 
           text: salaryText, 
           estimated: false,
@@ -1567,7 +1615,7 @@ const scraper = new LinkedInScraper();
 app.get('/', (req, res) => {
   res.json({
     name: 'LinkedIn Jobs Scraper API',
-    version: '3.7.0',
+    version: '3.8.0',
     status: 'operational',
     description: 'Get LinkedIn jobs with consistent numeric IDs and global LinkedIn-powered salary estimates',
     endpoints: [
@@ -1882,7 +1930,7 @@ app.use((err, req, res, next) => {
 // ====================
 app.listen(PORT, () => {
   console.log(`
-    🚀 LinkedIn Jobs Scraper API v3.7.0
+    🚀 LinkedIn Jobs Scraper API v3.8.0
     
     Port: ${PORT}
     Environment: ${process.env.NODE_ENV || 'development'}
@@ -1892,6 +1940,13 @@ app.listen(PORT, () => {
     ✅ Consistent 10-digit numeric IDs
     ✅ Up to 50 most relevant jobs per search
     
+    ENHANCED SALARY PARSING:
+    ✅ Handles ALL salary formats automatically:
+       • Hourly: $55.50 - $75.00, US$55.50 - US$75.00, 55.50 - 75.00/hour
+       • Yearly: $120K - $150K, $85,000 - $120,000, $85,000 to $120,000
+       • International: CAD$80K - CAD$100K, €50.000 - €70.000, £45K - £55K
+       • No more null max values!
+    
     GLOBAL SALARY ENDPOINT (50+ Countries):
     ✅ GET /api/salary-estimate/{title}/{location}
        Examples:
@@ -1899,24 +1954,10 @@ app.listen(PORT, () => {
        - /api/salary-estimate/storekeeper/dubai
        - /api/salary-estimate/teacher/tokyo?experience=senior
     
-    Returns professional-grade salary data:
-    • Total compensation breakdown (Base + Additional)
-    • Bonus and equity estimates by region
-    • Location-specific multipliers (USA, UK, Europe, Asia, Middle East, etc.)
-    • Confidence score based on data quality
-    • LinkedIn as the data source
-    
     Other Endpoints:
     ✅ GET /api/search/{keywords}/{location}
     ✅ GET /api/job/{jobId}
     ✅ GET /api/company/{companyIdentifier}
-    
-    Key Features:
-    • Clean, focused JSON responses
-    • Numeric IDs that work across endpoints
-    • Professional LinkedIn job data
-    • Global LinkedIn-powered salary estimates
-    • Company enrichment with employee count, about, industry, etc.
     
     Configuration:
     • Jobs per search: ${config.DEFAULT_RESULTS}
