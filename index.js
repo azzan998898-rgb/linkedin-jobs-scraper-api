@@ -463,7 +463,7 @@ class SalaryEstimator {
         'philippines': 0.3,
         'manila': 0.35,
         
-        // Middle East (UPDATED: Removed Israel/Tel Aviv, Added Oman)
+        // Middle East
         'united arab emirates': 0.9,
         'uae': 0.9,
         'dubai': 1.0,
